@@ -210,23 +210,36 @@ struct Guess {
   std::string reasoning;
 };
 
-// Abstract base class for a thing that can play Wordle.
+// Base class for a thing that can play Wordle.
 class Strategy {
 public:
+  Strategy(const WordList& word_list) : word_list_(word_list) {
+    set_ = word_list_.as_set();
+  }
+
   // Return the next guess to make.
   virtual Guess MakeGuess() = 0;
 
   // Process that the given guess got the given response.
-  virtual void ProcessResponse(const std::string& guess, const Response& response) = 0;
+  virtual void ProcessResponse(const std::string& guess, const Response& response) {
+    // Remove all words that don't conform to the guess.
+    set_ = FilterWordSet(word_list_, set_, guess, response);
+  }
 
   virtual ~Strategy() {}
+
+protected:
+  // The full list of possible words.
+  const WordList& word_list_;
+
+  // The current set of words that are still possible.
+  WordSet set_;
+
 };
 
 class ArbitraryValid : public Strategy {
 public:
-  ArbitraryValid(const WordList& word_list) : word_list_(word_list) {
-    set_ = word_list_.as_set();
-  }
+  ArbitraryValid(const WordList& word_list) : Strategy(word_list) {}
 
   Guess MakeGuess() override {
     if (set_.empty()) {
@@ -239,25 +252,14 @@ public:
     guess.word =  word_list_.words[set_[choice]];
     return guess;
   }
-
-  void ProcessResponse(const std::string& guess, const Response& response) override {
-    // Remove all words that don't conform to the guess.
-    set_ = FilterWordSet(word_list_, set_, guess, response);
-  }
-
-private:
-  // The full list of possible words.
-  const WordList& word_list_;
-
-  // The current set of words that are still possible.
-  WordSet set_;
 };
 
-class MaxEntropy : public Strategy {
+class BestResponseDistribution : public Strategy {
 public:
-  MaxEntropy(const WordList& word_list) : word_list_(word_list) {
-    set_ = word_list_.as_set();
-  }
+  BestResponseDistribution(const WordList& word_list) : Strategy(word_list) {}
+
+  virtual bool IsMaximizer() const = 0;
+  virtual double ScoreDistribution(const ResponseDistribution& distribution) const = 0;
 
   Guess MakeGuess() override {
     if (set_.empty()) {
@@ -272,18 +274,19 @@ public:
       return guess;
     }
 
-    // Hack for the first round.
-    if (set_.size() == word_list_.words.size()) {
-      Guess guess;
-      guess.word = "rates";
-      guess.reasoning = "Forced guess";
-      return guess;
-    }
+    // // Hack for the first round.
+    // if (set_.size() == word_list_.words.size()) {
+    //   Guess guess;
+    //   guess.word = "rates";
+    //   guess.reasoning = "Forced guess";
+    //   return guess;
+    // }
 
-    // Find the max-entropy guess.
-    double best_entropy = -1;
+    // Find the best guess.
+    double best_score = IsMaximizer() ?
+      -std::numeric_limits<double>::infinity() :
+      std::numeric_limits<double>::infinity();
     const std::string* best_guess = nullptr;
-    int possible_responses = 0;
     for (const std::string& guess : word_list_.words) {
       // Consider each possible remaining word, see what response it would
       // elicit with this guess, and record the distribution over responses.
@@ -294,18 +297,17 @@ public:
 	const Response response = ScoreGuess(guess, target);
 	++distribution[ResponseToCode(response)];
       }
-      // Compute the entropy of this response distribution.
-      const double entropy = ComputeEntropy(distribution);
-      // If this entropy is the best so far, record it.
-      if (entropy > best_entropy) {
-      	best_entropy = entropy;
+      // Compute some score over the distribution.
+      const double score = ScoreDistribution(distribution);
+      // If this score is the best so far, record it.
+      if (IsMaximizer() ? (score > best_score) : (score < best_score)) {
+      	best_score = score;
       	best_guess = &guess;
-	possible_responses = CountEntries(distribution);
       }
     }
 
     if (best_guess == nullptr) {
-      die("All guesses have negative entropy? Bug.");
+      die("All guesses have invalid scores? Bug.");
     }
 
     Guess guess;
@@ -314,13 +316,7 @@ public:
     return guess;
   }
 
-  void ProcessResponse(const std::string& guess, const Response& response) override {
-    // Remove all words that don't conform to the guess.
-    set_ = FilterWordSet(word_list_, set_, guess, response);
-  }
-
 private:
-
   std::string ExplainGuess(const std::string& guess) {
     std::ostringstream ss;
 
@@ -372,12 +368,16 @@ private:
 
     return ss.str();
   }
+};
 
-  // The full list of possible words.
-  const WordList& word_list_;
+class MaxEntropy : public BestResponseDistribution {
+public:
+  MaxEntropy(const WordList& word_list) : BestResponseDistribution(word_list) {}
 
-  // The current set of words that are still possible.
-  WordSet set_;
+  bool IsMaximizer() const override { return true; }
+  double ScoreDistribution(const ResponseDistribution& distribution) const override {
+    return ComputeEntropy(distribution);
+  }
 };
 
 std::unique_ptr<Strategy> MakeStrategy(const std::string& name,
@@ -405,7 +405,7 @@ int SelfPlay(const std::string& target, Strategy& strategy, DisplayMode display_
   while (guess.word != target) {
     guess = strategy.MakeGuess();
     Response response = ScoreGuess(guess.word, target);
-    if (display_mode >= VERBOSE) {
+    if (display_mode >= VERBOSE && !guess.reasoning.empty()) {
       std::cout << guess.reasoning << std::endl;
     }
     if (display_mode >= NORMAL) {
