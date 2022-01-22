@@ -28,6 +28,11 @@ WordList ReadWordList(const std::string& filename) {
     if (list.num_letters > 0 && list.num_letters != word.size()) {
       die("Got word with wrong number of letters: " + word);
     }
+    for (char c : word) {
+      if (c < 'a' || c > 'z') {
+	die("Got invalid character in word: " + word);
+      }
+    }
     list.num_letters = num_letters;
     list.words.push_back(word);
   }
