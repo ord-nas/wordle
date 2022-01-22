@@ -4,10 +4,24 @@
 #include <unordered_map>
 #include <vector>
 
+// A set of words from a WordList, represented as a sorted list of indices that
+// are in the set.
+using WordSet = std::vector<int>;
+
 // A list of words, using only characters a-z, all of the same length.
 struct WordList {
   std::vector<std::string> words;
   int num_letters = 0;
+
+  // Return a set representing all the words in this list.
+  WordSet as_set() const {
+    WordSet set;
+    set.reserve(words.size());
+    for (int i = 0; i < words.size(); i++) {
+      set.push_back(i);
+    }
+    return set;
+  }
 };
 
 // Possible per-letter guess outcomes.
@@ -57,6 +71,20 @@ Response ScoreGuess(const std::string& guess, const std::string& target) {
   return response;
 }
 
+// Filters the given input_set (from word_list) to only those where the given
+// guess would have elicited the given response.
+WordSet FilterWordSet(const WordList& word_list, const WordSet& input_set,
+		      const std::string& guess, const Response& response) {
+  WordSet output_set;
+  for (const int i : input_set) {
+    const std::string& word = word_list.words[i];
+    if (ScoreGuess(guess, word) == response) {
+      output_set.push_back(i);
+    }
+  }
+  return output_set;
+}
+
 // Display the response for this guess, using ANSI color codes.
 void DisplayResponse(const std::string& guess, const Response& response) {
   if (guess.size() != response.size()) {
@@ -77,6 +105,13 @@ void DisplayResponse(const std::string& guess, const Response& response) {
     }
   }
   std::cout << std::endl;
+}
+
+// Print all words in the given set.
+void DisplayWordSet(const WordList& word_list, const WordSet& set) {
+  for (const int i : set) {
+    std::cout << word_list.words[i] << std::endl;
+  }
 }
 
 // Read a world list from the given filename.
@@ -134,6 +169,9 @@ int main(int argc, char* argv[]) {
   score_and_display("pluck");
   score_and_display("wench");
   score_and_display("wince");
+
+  const WordSet all = list.as_set();
+  DisplayWordSet(list, FilterWordSet(list, all, "rxxxx", {PARTIAL_MATCH, NO_MATCH, NO_MATCH, NO_MATCH, NO_MATCH}));
 
   return 0;
 }
