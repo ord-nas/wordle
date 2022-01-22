@@ -1,0 +1,16 @@
+* Better estimate of expected moves given word set size.
+  * Can start with MaxEntropy, get empirical data.
+  * Repeated until reaching a fixed point.
+* Probabilistic?
+* Tree search, starting when set size is small emough?
+  * Maybe to get a feel for if this will be useful or not, hammer on a single word and fuzz the guesses and see if we can do better than the best entropy guess.
+* Correctly recognize that getting the word right is good actually! E.g.:
+
+Words left: 2 {rebut, robot}
+For guess aaron, there are 2 responses.
+For guess aaron, potential reponses are: {aaron => (robot), aaron => (rebut)}
+aaron
+Words left: 1 {robot}
+robot
+
+Okay fine, but why didn't you guess one of robot or rebut instead of aaron? That would have narrowed it down the same way but you have a 50% chance of getting it on the first try!
