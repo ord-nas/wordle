@@ -1,5 +1,7 @@
 #include <fstream>
 #include <iostream>
+#include <memory>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -108,10 +110,19 @@ void DisplayResponse(const std::string& guess, const Response& response) {
 }
 
 // Print all words in the given set.
-void DisplayWordSet(const WordList& word_list, const WordSet& set) {
+std::string WordSetToString(const WordList& word_list, const WordSet& set) {
+  std::ostringstream ss;
+  bool first = true;
+  ss << "{";
   for (const int i : set) {
-    std::cout << word_list.words[i] << std::endl;
+    if (!first) {
+      ss << ", ";
+    }
+    ss << word_list.words[i];
+    first = false;
   }
+  ss << "}";
+  return ss.str();
 }
 
 // Read a world list from the given filename.
@@ -147,6 +158,70 @@ WordList ReadWordList(const std::string& filename) {
   return list;
 }
 
+// Abstract base class for a thing that can play Wordle.
+class Strategy {
+public:
+  // Return the next guess to make.
+  virtual std::string MakeGuess() = 0;
+
+  // Process that the given guess got the given response.
+  virtual void ProcessResponse(const std::string& guess, const Response& response) = 0;
+
+  virtual ~Strategy() {}
+};
+
+class ArbitraryValid : public Strategy {
+public:
+  ArbitraryValid(const WordList& word_list) : word_list_(word_list) {
+    set_ = word_list_.as_set();
+  }
+
+  std::string MakeGuess() override {
+    if (set_.empty()) {
+      die("Can't make a guess if there are no more possible words!");
+    }
+
+    // Just arbitrarily pick a word that is still valid.
+    const int choice = rand() % set_.size();
+    return word_list_.words[set_[choice]];
+  }
+
+  void ProcessResponse(const std::string& guess, const Response& response) override {
+    // Remove all words that don't conform to the guess.
+    set_ = FilterWordSet(word_list_, set_, guess, response);
+    // std::cout << "Possible words are now: " << WordSetToString(word_list_, set_) << std::endl;
+  }
+
+private:
+  // The full list of possible words.
+  const WordList& word_list_;
+
+  // The current set of words that are still possible.
+  WordSet set_;
+};
+
+std::unique_ptr<Strategy> MakeStrategy(const std::string& name,
+				       const WordList& word_list) {
+  if (name == "ArbitraryValid") {
+    return std::make_unique<ArbitraryValid>(word_list);
+  } else {
+    die("Unrecognized strategy name: " + name);
+  }
+}
+
+int SelfPlay(const std::string& target, Strategy& strategy) {
+  std::string guess = "";
+  int count = 0;
+  while (guess != target) {
+    guess = strategy.MakeGuess();
+    Response response = ScoreGuess(guess, target);
+    DisplayResponse(guess, response);
+    strategy.ProcessResponse(guess, response);
+    ++count;
+  }
+  return count;
+}
+
 int main(int argc, char* argv[]) {
   std::cout << "Hello world!" << std::endl;
   std::cout << "Wordle is not implemented yet :)" << std::endl;
@@ -171,7 +246,15 @@ int main(int argc, char* argv[]) {
   score_and_display("wince");
 
   const WordSet all = list.as_set();
-  DisplayWordSet(list, FilterWordSet(list, all, "rxxxx", {PARTIAL_MATCH, NO_MATCH, NO_MATCH, NO_MATCH, NO_MATCH}));
+  std::cout << WordSetToString(list, FilterWordSet(list, all, "rxxxx", {PARTIAL_MATCH, NO_MATCH, NO_MATCH, NO_MATCH, NO_MATCH}))
+	    << std::endl;
+
+  for (const std::string& word : list.words) {
+    std::cout << "Secret word is: " << word << std::endl;
+    std::unique_ptr<Strategy> strategy = MakeStrategy("ArbitraryValid", list);
+    const int guesses = SelfPlay(word, *strategy);
+    std::cout << "Guessed in " << guesses << std::endl;
+  }
 
   return 0;
 }
