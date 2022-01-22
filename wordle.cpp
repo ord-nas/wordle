@@ -1,5 +1,6 @@
 #include <fstream>
 #include <iostream>
+#include <math.h>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -73,6 +74,25 @@ Response ScoreGuess(const std::string& guess, const std::string& target) {
   return response;
 }
 
+// Converts the given response into a unique integer code.
+int ResponseToCode(const Response& response) {
+  int code = 0;
+  for (const Outcome& outcome : response) {
+    code *= 3;
+    switch (outcome) {
+    case EXACT_MATCH:
+      break;
+    case PARTIAL_MATCH:
+      code += 1;
+      break;
+    case NO_MATCH:
+      code += 2;
+      break;
+    }
+  }
+  return code;
+}
+
 // Filters the given input_set (from word_list) to only those where the given
 // guess would have elicited the given response.
 WordSet FilterWordSet(const WordList& word_list, const WordSet& input_set,
@@ -85,6 +105,23 @@ WordSet FilterWordSet(const WordList& word_list, const WordSet& input_set,
     }
   }
   return output_set;
+}
+
+double ComputeEntropy(const std::unordered_map<int, int>& distribution) {
+  // First count the total number of entries in the distribution.
+  int N = 0;
+  for (const auto& entry : distribution) {
+    N += entry.second;
+  }
+
+  // Then tally up entropy.
+  double entropy;
+  for (const auto& entry : distribution) {
+    const double P = 1.0 * entry.second / N;
+    entropy -= P * log(P);
+  }
+
+  return entropy;
 }
 
 // Display the response for this guess, using ANSI color codes.
@@ -200,10 +237,68 @@ private:
   WordSet set_;
 };
 
+class MaxEntropy : public Strategy {
+public:
+  MaxEntropy(const WordList& word_list) : word_list_(word_list) {
+    set_ = word_list_.as_set();
+  }
+
+  std::string MakeGuess() override {
+    if (set_.empty()) {
+      die("Can't make a guess if there are no more possible words!");
+    }
+
+    // If we know the answer, guess it!
+    if (set_.size() == 1) {
+      return word_list_.words[set_[0]];
+    }
+
+    // Find the max-entropy guess.
+    double best_entropy = -1;
+    const std::string* best_guess = nullptr;
+    for (const std::string& guess : word_list_.words) {
+      // Consider each possible remaining word, see what response it would
+      // elicit with this guess, and record the distribution over responses.
+      std::unordered_map<int, int> response_counts;
+      for (const int i : set_) {
+	const std::string target = word_list_.words[i];
+	const Response response = ScoreGuess(guess, target);
+	++response_counts[ResponseToCode(response)];
+      }
+      // Compute the entropy of this response distribution.
+      const double entropy = ComputeEntropy(response_counts);
+      // If this entropy is the best so far, record it.
+      if (entropy > best_entropy) {
+	best_entropy = entropy;
+	best_guess = &guess;
+      }
+    }
+
+    if (best_guess == nullptr) {
+      die("All guesses have negative entropy? Bug.");
+    }
+    return *best_guess;
+  }
+
+  void ProcessResponse(const std::string& guess, const Response& response) override {
+    // Remove all words that don't conform to the guess.
+    set_ = FilterWordSet(word_list_, set_, guess, response);
+  }
+
+private:
+  // The full list of possible words.
+  const WordList& word_list_;
+
+  // The current set of words that are still possible.
+  WordSet set_;
+};
+
 std::unique_ptr<Strategy> MakeStrategy(const std::string& name,
 				       const WordList& word_list) {
   if (name == "ArbitraryValid") {
     return std::make_unique<ArbitraryValid>(word_list);
+  } else if (name == "MaxEntropy") {
+    return std::make_unique<MaxEntropy>(word_list);
   } else {
     die("Unrecognized strategy name: " + name);
   }
@@ -249,9 +344,12 @@ int main(int argc, char* argv[]) {
   std::cout << WordSetToString(list, FilterWordSet(list, all, "rxxxx", {PARTIAL_MATCH, NO_MATCH, NO_MATCH, NO_MATCH, NO_MATCH}))
 	    << std::endl;
 
-  for (const std::string& word : list.words) {
+  std::cout << std::endl << std::endl << std::endl;
+
+  for (int i = 0; i < 5; i++) {
+    const std::string& word = list.words[rand() % list.words.size()];
     std::cout << "Secret word is: " << word << std::endl;
-    std::unique_ptr<Strategy> strategy = MakeStrategy("ArbitraryValid", list);
+    std::unique_ptr<Strategy> strategy = MakeStrategy("MaxEntropy", list);
     const int guesses = SelfPlay(word, *strategy);
     std::cout << "Guessed in " << guesses << std::endl;
   }
