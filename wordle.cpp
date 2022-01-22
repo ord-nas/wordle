@@ -1,5 +1,6 @@
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <math.h>
 #include <memory>
 #include <sstream>
@@ -14,7 +15,6 @@ using WordSet = std::vector<int>;
 // A list of words, using only characters a-z, all of the same length.
 struct WordList {
   std::vector<std::string> words;
-  int num_letters = 0;
 
   // Return a set representing all the words in this list.
   WordSet as_set() const {
@@ -37,8 +37,11 @@ enum Outcome {
   NO_MATCH,
 };
 
+constexpr int NUM_LETTERS = 5;
+constexpr int NUM_RESPONSES = 243; // 3 ^ NUM_LETTERS
+
 // Guess outcomes for a full word. Response[i] is the outcome for guess[i].
-using Response = std::vector<Outcome>;
+using Response = std::array<Outcome, NUM_LETTERS>;
 
 // Print the given error message and abort.
 void die(const std::string& message) {
@@ -47,27 +50,21 @@ void die(const std::string& message) {
 }
 
 // Score guess against target.
-Response ScoreGuess(const std::string& guess, const std::string& target) {
-  if (guess.size() != target.size()) {
-    die("Can't score guess and target of different sizes. guess=" + guess + ", target=" + target);
-  }
-
-  // Get all the characters in target that aren't an exact match.
-  std::unordered_map<char, int> potential_partials;
-  for (int i = 0; i < guess.size(); i++) {
-    if (guess[i] != target[i]) {
-      ++potential_partials[target[i]];
-    }
-  }
-
-  // Now build the response.
-  Response response(guess.size(), NO_MATCH);
-  for (int i = 0; i < guess.size(); i++) {
+Response ScoreGuess(const std::string& guess, std::string target) {
+  Response response;
+  for (int i = 0; i < NUM_LETTERS; i++) {
     if (guess[i] == target[i]) {
       response[i] = EXACT_MATCH;
-    } else if (potential_partials[guess[i]] > 0) {
-      response[i] = PARTIAL_MATCH;
-      --potential_partials[guess[i]];
+    } else {
+      response[i] = NO_MATCH;
+      // Try to find a partial match.
+      for (int j = i + 1; j < NUM_LETTERS; j++) {
+	if (guess[i] == target[j] && guess[j] != target[j]) {
+	  target[j] = '.';
+	  response[i] = PARTIAL_MATCH;
+	  break;
+	}
+      }
     }
   }
 
@@ -93,6 +90,8 @@ int ResponseToCode(const Response& response) {
   return code;
 }
 
+using ResponseDistribution = std::array<int, NUM_RESPONSES>;
+
 // Filters the given input_set (from word_list) to only those where the given
 // guess would have elicited the given response.
 WordSet FilterWordSet(const WordList& word_list, const WordSet& input_set,
@@ -107,18 +106,20 @@ WordSet FilterWordSet(const WordList& word_list, const WordSet& input_set,
   return output_set;
 }
 
-double ComputeEntropy(const std::unordered_map<int, int>& distribution) {
+double ComputeEntropy(const ResponseDistribution& distribution) {
   // First count the total number of entries in the distribution.
   int N = 0;
-  for (const auto& entry : distribution) {
-    N += entry.second;
+  for (const int entry : distribution) {
+    N += entry;
   }
 
   // Then tally up entropy.
   double entropy;
-  for (const auto& entry : distribution) {
-    const double P = 1.0 * entry.second / N;
-    entropy -= P * log(P);
+  for (const int entry : distribution) {
+    if (entry > 0) {
+      const double P = 1.0 * entry / N;
+      entropy -= P * log(P);
+    }
   }
 
   return entropy;
@@ -174,8 +175,7 @@ WordList ReadWordList(const std::string& filename) {
   WordList list;
   std::string word;
   while (file >> word) {
-    const int num_letters = word.size();
-    if (list.num_letters > 0 && list.num_letters != word.size()) {
+    if (word.size() != NUM_LETTERS) {
       die("Got word with wrong number of letters: " + word);
     }
     for (char c : word) {
@@ -183,12 +183,11 @@ WordList ReadWordList(const std::string& filename) {
 	die("Got invalid character in word: " + word);
       }
     }
-    list.num_letters = num_letters;
     list.words.push_back(word);
   }
 
   // Error checking.
-  if (list.words.size() == 0 || list.num_letters == 0) {
+  if (list.words.size() == 0) {
     die("Empty word list.");
   }
 
@@ -259,18 +258,19 @@ public:
     for (const std::string& guess : word_list_.words) {
       // Consider each possible remaining word, see what response it would
       // elicit with this guess, and record the distribution over responses.
-      std::unordered_map<int, int> response_counts;
+      ResponseDistribution distribution;
+      distribution.fill(0);
       for (const int i : set_) {
-	const std::string target = word_list_.words[i];
+	const std::string& target = word_list_.words[i];
 	const Response response = ScoreGuess(guess, target);
-	++response_counts[ResponseToCode(response)];
+	++distribution[ResponseToCode(response)];
       }
       // Compute the entropy of this response distribution.
-      const double entropy = ComputeEntropy(response_counts);
+      const double entropy = ComputeEntropy(distribution);
       // If this entropy is the best so far, record it.
       if (entropy > best_entropy) {
-	best_entropy = entropy;
-	best_guess = &guess;
+      	best_entropy = entropy;
+      	best_guess = &guess;
       }
     }
 
@@ -318,41 +318,13 @@ int SelfPlay(const std::string& target, Strategy& strategy) {
 }
 
 int main(int argc, char* argv[]) {
-  std::cout << "Hello world!" << std::endl;
-  std::cout << "Wordle is not implemented yet :)" << std::endl;
   const WordList list = ReadWordList("wordlist");
-  std::cout << "Number of letters is: " << list.num_letters << std::endl;
-  std::cout << "Words are:" << std::endl;
-  for (const auto& word : list.words) {
-    std::cout << word << std::endl;
-  }
-
-  const std::string target = "wince";
-
-  const auto score_and_display = [&](const std::string& guess) {
-    const Response response = ScoreGuess(guess, target);
-    DisplayResponse(guess, response);
-  };
-
-  score_and_display("iotas");
-  score_and_display("brief");
-  score_and_display("pluck");
-  score_and_display("wench");
-  score_and_display("wince");
-
-  const WordSet all = list.as_set();
-  std::cout << WordSetToString(list, FilterWordSet(list, all, "rxxxx", {PARTIAL_MATCH, NO_MATCH, NO_MATCH, NO_MATCH, NO_MATCH}))
-	    << std::endl;
-
-  std::cout << std::endl << std::endl << std::endl;
-
-  for (int i = 0; i < 5; i++) {
-    const std::string& word = list.words[rand() % list.words.size()];
+  for (const std::string word : {"wince", "prick", "robot", "point", "proxy", "shire", "solar", "panic", "tangy"}) {
+    // const std::string& word = list.words[rand() % list.words.size()];
     std::cout << "Secret word is: " << word << std::endl;
     std::unique_ptr<Strategy> strategy = MakeStrategy("MaxEntropy", list);
     const int guesses = SelfPlay(word, *strategy);
     std::cout << "Guessed in " << guesses << std::endl;
   }
-
   return 0;
 }
