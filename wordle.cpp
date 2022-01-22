@@ -125,26 +125,32 @@ double ComputeEntropy(const ResponseDistribution& distribution) {
   return entropy;
 }
 
-// Display the response for this guess, using ANSI color codes.
-void DisplayResponse(const std::string& guess, const Response& response) {
+std::string ColorGuess(const std::string& guess, const Response& response) {
   if (guess.size() != response.size()) {
     die("Can't display guess and target of different sizes. guess=" + guess);
   }
 
+  std::ostringstream ss;
   for (int i = 0; i < guess.size(); i++) {
     switch (response[i]) {
       case NO_MATCH:
-	std::cout << "\033[37;40m" << guess[i] << "\033[0m";
+	ss << "\033[37;40m" << guess[i] << "\033[0m";
 	break;
       case EXACT_MATCH:
-	std::cout << "\033[37;42m" << guess[i] << "\033[0m";
+	ss << "\033[37;42m" << guess[i] << "\033[0m";
 	break;
       case PARTIAL_MATCH:
-	std::cout << "\033[37;43m" << guess[i] << "\033[0m";
+	ss << "\033[37;43m" << guess[i] << "\033[0m";
 	break;
     }
   }
-  std::cout << std::endl;
+
+  return ss.str();
+}
+
+// Display the response for this guess, using ANSI color codes.
+void DisplayResponse(const std::string& guess, const Response& response) {
+  std::cout << ColorGuess(guess, response) << std::endl;
 }
 
 // Print all words in the given set.
@@ -277,12 +283,43 @@ public:
     if (best_guess == nullptr) {
       die("All guesses have negative entropy? Bug.");
     }
+
+    if (set_.size() <= 10) {
+      std::unordered_map<std::string, std::vector<std::string>> response_to_targets;
+      for (const int i : set_) {
+	const std::string& target = word_list_.words[i];
+	const Response response = ScoreGuess(*best_guess, target);
+	response_to_targets[ColorGuess(*best_guess, response)].push_back(target);
+      }
+
+      std::cout << "For guess " << *best_guess << ", potential reponses are: {";
+      bool outer_first = true;
+      for (const auto& entry : response_to_targets) {
+	if (!outer_first) std::cout << ", ";
+	std::cout << entry.first << " => (";
+	bool inner_first = true;
+	for (const auto& target : entry.second) {
+	  if (!inner_first) std::cout << ", ";
+	  std::cout << target;
+	  inner_first = false;
+	}
+	std::cout << ")";
+	outer_first = false;
+      }
+      std::cout << "}" << std::endl;
+    }
+
     return *best_guess;
   }
 
   void ProcessResponse(const std::string& guess, const Response& response) override {
     // Remove all words that don't conform to the guess.
     set_ = FilterWordSet(word_list_, set_, guess, response);
+    if (set_.size() > 10) {
+      std::cout << "Words left: " << set_.size() << std::endl;
+    } else {
+      std::cout << "Words left: " << set_.size() << " " << WordSetToString(word_list_, set_) << std::endl;
+    }
   }
 
 private:
