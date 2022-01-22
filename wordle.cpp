@@ -125,6 +125,16 @@ double ComputeEntropy(const ResponseDistribution& distribution) {
   return entropy;
 }
 
+double CountEntries(const ResponseDistribution& distribution) {
+  // Count how many distinct responses.
+  int N = 0;
+  for (const int entry : distribution) {
+    if (entry > 0) ++N;
+  }
+  return N;
+}
+
+// Color the guess based on the response, using ANSI color codes.
 std::string ColorGuess(const std::string& guess, const Response& response) {
   if (guess.size() != response.size()) {
     die("Can't display guess and target of different sizes. guess=" + guess);
@@ -146,11 +156,6 @@ std::string ColorGuess(const std::string& guess, const Response& response) {
   }
 
   return ss.str();
-}
-
-// Display the response for this guess, using ANSI color codes.
-void DisplayResponse(const std::string& guess, const Response& response) {
-  std::cout << ColorGuess(guess, response) << std::endl;
 }
 
 // Print all words in the given set.
@@ -200,11 +205,16 @@ WordList ReadWordList(const std::string& filename) {
   return list;
 }
 
+struct Guess {
+  std::string word;
+  std::string reasoning;
+};
+
 // Abstract base class for a thing that can play Wordle.
 class Strategy {
 public:
   // Return the next guess to make.
-  virtual std::string MakeGuess() = 0;
+  virtual Guess MakeGuess() = 0;
 
   // Process that the given guess got the given response.
   virtual void ProcessResponse(const std::string& guess, const Response& response) = 0;
@@ -218,20 +228,21 @@ public:
     set_ = word_list_.as_set();
   }
 
-  std::string MakeGuess() override {
+  Guess MakeGuess() override {
     if (set_.empty()) {
       die("Can't make a guess if there are no more possible words!");
     }
 
     // Just arbitrarily pick a word that is still valid.
+    Guess guess;
     const int choice = rand() % set_.size();
-    return word_list_.words[set_[choice]];
+    guess.word =  word_list_.words[set_[choice]];
+    return guess;
   }
 
   void ProcessResponse(const std::string& guess, const Response& response) override {
     // Remove all words that don't conform to the guess.
     set_ = FilterWordSet(word_list_, set_, guess, response);
-    // std::cout << "Possible words are now: " << WordSetToString(word_list_, set_) << std::endl;
   }
 
 private:
@@ -248,19 +259,31 @@ public:
     set_ = word_list_.as_set();
   }
 
-  std::string MakeGuess() override {
+  Guess MakeGuess() override {
     if (set_.empty()) {
       die("Can't make a guess if there are no more possible words!");
     }
 
     // If we know the answer, guess it!
     if (set_.size() == 1) {
-      return word_list_.words[set_[0]];
+      Guess guess;
+      guess.word = word_list_.words[set_[0]];
+      guess.reasoning = "Only one word remaining";
+      return guess;
+    }
+
+    // Hack for the first round.
+    if (set_.size() == word_list_.words.size()) {
+      Guess guess;
+      guess.word = "rates";
+      guess.reasoning = "Forced guess";
+      return guess;
     }
 
     // Find the max-entropy guess.
     double best_entropy = -1;
     const std::string* best_guess = nullptr;
+    int possible_responses = 0;
     for (const std::string& guess : word_list_.words) {
       // Consider each possible remaining word, see what response it would
       // elicit with this guess, and record the distribution over responses.
@@ -277,6 +300,7 @@ public:
       if (entropy > best_entropy) {
       	best_entropy = entropy;
       	best_guess = &guess;
+	possible_responses = CountEntries(distribution);
       }
     }
 
@@ -284,45 +308,71 @@ public:
       die("All guesses have negative entropy? Bug.");
     }
 
-    if (set_.size() <= 10) {
-      std::unordered_map<std::string, std::vector<std::string>> response_to_targets;
-      for (const int i : set_) {
-	const std::string& target = word_list_.words[i];
-	const Response response = ScoreGuess(*best_guess, target);
-	response_to_targets[ColorGuess(*best_guess, response)].push_back(target);
-      }
-
-      std::cout << "For guess " << *best_guess << ", potential reponses are: {";
-      bool outer_first = true;
-      for (const auto& entry : response_to_targets) {
-	if (!outer_first) std::cout << ", ";
-	std::cout << entry.first << " => (";
-	bool inner_first = true;
-	for (const auto& target : entry.second) {
-	  if (!inner_first) std::cout << ", ";
-	  std::cout << target;
-	  inner_first = false;
-	}
-	std::cout << ")";
-	outer_first = false;
-      }
-      std::cout << "}" << std::endl;
-    }
-
-    return *best_guess;
+    Guess guess;
+    guess.word = *best_guess;
+    guess.reasoning = ExplainGuess(*best_guess);
+    return guess;
   }
 
   void ProcessResponse(const std::string& guess, const Response& response) override {
     // Remove all words that don't conform to the guess.
     set_ = FilterWordSet(word_list_, set_, guess, response);
-    if (set_.size() > 10) {
-      std::cout << "Words left: " << set_.size() << std::endl;
-    } else {
-      std::cout << "Words left: " << set_.size() << " " << WordSetToString(word_list_, set_) << std::endl;
-    }
   }
 
 private:
+
+  std::string ExplainGuess(const std::string& guess) {
+    std::ostringstream ss;
+
+    // Count up the number of distinct responses that are possible given this
+    // guess.
+    ResponseDistribution distribution;
+    distribution.fill(0);
+    for (const int i : set_) {
+      const std::string& target = word_list_.words[i];
+      const Response response = ScoreGuess(guess, target);
+      ++distribution[ResponseToCode(response)];
+    }
+    const int possible_responses = CountEntries(distribution);
+
+    // Now generate the rationale.
+    if (set_.size() > 10) {
+      // If the set is too big, just summarize.
+      ss << "Words left: " << set_.size() << std::endl;
+      ss << "Guess " << guess << " has " << possible_responses << " responses";
+    } else {
+      // Otherwise, go into more detail.
+      ss << "Words left: " << set_.size() << " " << WordSetToString(word_list_, set_) << std::endl;
+
+      // Partition the set of possible words based on the response to our guess.
+      std::unordered_map<std::string, std::vector<std::string>> response_to_targets;
+      for (const int i : set_) {
+	const std::string& target = word_list_.words[i];
+	const Response response = ScoreGuess(guess, target);
+	response_to_targets[ColorGuess(guess, response)].push_back(target);
+      }
+
+      // Format.
+      ss << "Guess " << guess << " has " << possible_responses << " responses {";
+      bool outer_first = true;
+      for (const auto& entry : response_to_targets) {
+	if (!outer_first) ss << ", ";
+	ss << entry.first << " => (";
+	bool inner_first = true;
+	for (const auto& target : entry.second) {
+	  if (!inner_first) ss << ", ";
+	  ss << target;
+	  inner_first = false;
+	}
+	ss << ")";
+	outer_first = false;
+      }
+      ss << "}";
+    }
+
+    return ss.str();
+  }
+
   // The full list of possible words.
   const WordList& word_list_;
 
@@ -341,14 +391,27 @@ std::unique_ptr<Strategy> MakeStrategy(const std::string& name,
   }
 }
 
-int SelfPlay(const std::string& target, Strategy& strategy) {
-  std::string guess = "";
+enum DisplayMode {
+  SILENT = 0,
+  NORMAL = 1,
+  VERBOSE = 2,
+};
+
+int SelfPlay(const std::string& target, Strategy& strategy, DisplayMode display_mode) {
+  Guess guess;
+  guess.word = "";
+  guess.reasoning = "";
   int count = 0;
-  while (guess != target) {
+  while (guess.word != target) {
     guess = strategy.MakeGuess();
-    Response response = ScoreGuess(guess, target);
-    DisplayResponse(guess, response);
-    strategy.ProcessResponse(guess, response);
+    Response response = ScoreGuess(guess.word, target);
+    if (display_mode >= VERBOSE) {
+      std::cout << guess.reasoning << std::endl;
+    }
+    if (display_mode >= NORMAL) {
+      std::cout << ColorGuess(guess.word, response) << std::endl;
+    }
+    strategy.ProcessResponse(guess.word, response);
     ++count;
   }
   return count;
@@ -360,7 +423,7 @@ int main(int argc, char* argv[]) {
     // const std::string& word = list.words[rand() % list.words.size()];
     std::cout << "Secret word is: " << word << std::endl;
     std::unique_ptr<Strategy> strategy = MakeStrategy("MaxEntropy", list);
-    const int guesses = SelfPlay(word, *strategy);
+    const int guesses = SelfPlay(word, *strategy, /*display_mode=*/VERBOSE);
     std::cout << "Guessed in " << guesses << std::endl;
   }
   return 0;
