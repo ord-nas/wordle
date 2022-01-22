@@ -4,24 +4,32 @@
 #include <unordered_map>
 #include <vector>
 
+// A list of words, using only characters a-z, all of the same length.
 struct WordList {
   std::vector<std::string> words;
   int num_letters = 0;
 };
 
+// Possible per-letter guess outcomes.
 enum Outcome {
+  // Right letter in right location.
   EXACT_MATCH,
+  // Right letter in wrong location.
   PARTIAL_MATCH,
+  // Wrong letter.
   NO_MATCH,
 };
 
+// Guess outcomes for a full word. Response[i] is the outcome for guess[i].
 using Response = std::vector<Outcome>;
 
+// Print the given error message and abort.
 void die(const std::string& message) {
   std::cout << message << std::endl;
   exit(1);
 }
 
+// Score guess against target.
 Response ScoreGuess(const std::string& guess, const std::string& target) {
   if (guess.size() != target.size()) {
     die("Can't score guess and target of different sizes. guess=" + guess + ", target=" + target);
@@ -49,6 +57,7 @@ Response ScoreGuess(const std::string& guess, const std::string& target) {
   return response;
 }
 
+// Display the response for this guess, using ANSI color codes.
 void DisplayResponse(const std::string& guess, const Response& response) {
   if (guess.size() != response.size()) {
     die("Can't display guess and target of different sizes. guess=" + guess);
@@ -70,6 +79,7 @@ void DisplayResponse(const std::string& guess, const Response& response) {
   std::cout << std::endl;
 }
 
+// Read a world list from the given filename.
 WordList ReadWordList(const std::string& filename) {
   // Open the file.
   std::ifstream file(filename);
