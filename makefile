@@ -1,2 +1,2 @@
 wordle: wordle.cpp
-	g++ wordle.cpp -o wordle
+	g++ --std=c++17 wordle.cpp -o wordle
