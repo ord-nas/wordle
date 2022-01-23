@@ -664,7 +664,7 @@ GameOutcome SelfPlay(const std::string& target,
 }
 
 void SelfPlayLoop(const WordList& list, const Flags& flags) {
-  const std::string strategy_name = flags.Get("strategy", /*default=*/"MaxEntropy");
+  const std::string strategy_name = flags.Get("strategy", /*default=*/"MinExpectedGuesses");
   const std::vector<std::string> forced_guesses = Split(flags.Get("forced_guesses", /*default=*/""), ',');
   const Verbosity verbosity = ToVerbosity(flags.Get("verbosity", "NORMAL"));
 
