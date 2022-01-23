@@ -502,16 +502,28 @@ std::unique_ptr<Strategy> MakeStrategy(const std::string& name,
   }
 }
 
-enum DisplayMode {
+enum Verbosity {
   SILENT = 0,
   NORMAL = 1,
   VERBOSE = 2,
 };
 
+Verbosity ToVerbosity(const std::string& str) {
+  if (str == "SILENT") {
+    return SILENT;
+  } else if (str == "NORMAL") {
+    return NORMAL;
+  } else if (str == "VERBOSE") {
+    return VERBOSE;
+  } else {
+    die("Unrecognized verbosity: " + str);
+  }
+}
+
 int SelfPlay(const std::string& target,
 	     Strategy& strategy,
 	     std::vector<std::string> forced_guesses,
-	     DisplayMode display_mode) {
+	     Verbosity verbosity) {
   Guess guess;
   guess.word = "";
   guess.reasoning = "";
@@ -525,10 +537,10 @@ int SelfPlay(const std::string& target,
       guess = strategy.MakeGuess();
     }
     Response response = ScoreGuess(guess.word, target);
-    if (display_mode >= VERBOSE && !guess.reasoning.empty()) {
+    if (verbosity >= VERBOSE && !guess.reasoning.empty()) {
       std::cout << guess.reasoning << std::endl;
     }
-    if (display_mode >= NORMAL) {
+    if (verbosity >= NORMAL) {
       std::cout << ColorGuess(guess.word, response) << std::endl;
     }
     strategy.ProcessResponse(guess.word, response);
@@ -542,6 +554,8 @@ void SelfPlayLoop(const WordList& list, const Flags& flags) {
 
   const std::vector<std::string> forced_guesses = Split(flags.Get("forced_guesses", /*default=*/""), ',');
 
+  const Verbosity verbosity = ToVerbosity(flags.Get("verbosity", "NORMAL"));
+
   while (true) {
     std::cout << "Enter a word to play, or empty string to pick a random word: ";
     std::string word;
@@ -553,7 +567,7 @@ void SelfPlayLoop(const WordList& list, const Flags& flags) {
       ValidateWord(word);
     }
     std::unique_ptr<Strategy> strategy = MakeStrategy(strategy_name, list);
-    const int guesses = SelfPlay(word, *strategy, forced_guesses, /*display_mode=*/VERBOSE);
+    const int guesses = SelfPlay(word, *strategy, forced_guesses, verbosity);
     std::cout << "Guessed in " << guesses << std::endl;
   }
 }
