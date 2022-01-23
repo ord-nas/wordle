@@ -265,13 +265,31 @@ double ComputeExpectedGuesses(const ResponseDistribution& distribution) {
       } else if (count == 2) {
 	expected_guesses = 1.5;
       } else {
+	// With the mieliestronk word list:
+	//
 	// From logarithmic fit on data from `python3 analyze.py stats/max_entropy_counts.csv`
 	// expected_guesses = 1.65 + 0.291 * log(count);
+	//
 	// From logarithmic fit on data from `python3 analyze.py stats/min_expected_guess_counts_0.csv`
-	expected_guesses = 1.51 + 0.289 * log(count);
+	// expected_guesses = 1.51 + 0.289 * log(count);
+	//
 	// Note: `python3 analyze.py stats/min_expected_guess_counts_1.csv`
 	// shows basically the same equation, so we have roughly hit a fixed
 	// point.
+	//
+	// With the official wordlist:
+	//
+	// First used the previous expected_guesses = 1.51 + 0.289 * log(count);
+	//
+	// From logarithmic fit on data from `python3 analyze.py
+	// stats/official_words_min_expected_guess_counts_0.csv` Note, I also
+	// removed datapoints at 1, 2, and wordlist size, since those will never
+	// be used.
+	expected_guesses = 1.56 + 0.25 * log(count);
+	//
+	// Note: `python3 analyze.py
+	// stats/official_words_min_expected_guess_counts_1.csv` shows basically
+	// the same equation, so we have roughly hit a fixed point.
       }
       guess_sum += P * expected_guesses;
     }
