@@ -58,7 +58,7 @@ Response ScoreGuess(const std::string& guess, std::string target) {
     } else {
       response[i] = NO_MATCH;
       // Try to find a partial match.
-      for (int j = i + 1; j < NUM_LETTERS; j++) {
+      for (int j = 0; j < NUM_LETTERS; j++) {
 	if (guess[i] == target[j] && guess[j] != target[j]) {
 	  target[j] = '.';
 	  response[i] = PARTIAL_MATCH;
