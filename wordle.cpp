@@ -346,6 +346,10 @@ public:
     set_ = FilterWordSet(word_list_, set_, guess, response);
   }
 
+  // Return the number of words that still remain as possibilities given the
+  // responses so far.
+  int NumRemainingWords() const { return set_.size(); }
+
   virtual ~Strategy() {}
 
 protected:
@@ -354,7 +358,6 @@ protected:
 
   // The current set of words that are still possible.
   WordSet set_;
-
 };
 
 class ArbitraryValid : public Strategy {
@@ -521,15 +524,23 @@ Verbosity ToVerbosity(const std::string& str) {
   }
 }
 
-int SelfPlay(const std::string& target,
+struct GameOutcome {
+  int guess_count = 0;
+  // remaining_word_history[i] means the number of remaining words after i
+  // receiving i responses.
+  std::vector<int> remaining_word_history;
+};
+
+GameOutcome SelfPlay(const std::string& target,
 	     Strategy& strategy,
 	     std::vector<std::string> forced_guesses,
 	     Verbosity verbosity) {
   Guess guess;
   guess.word = "";
   guess.reasoning = "";
-  int count = 0;
+  GameOutcome outcome;
   while (guess.word != target) {
+    outcome.remaining_word_history.push_back(strategy.NumRemainingWords());
     if (!forced_guesses.empty()) {
       guess.word = forced_guesses[0];
       guess.reasoning = "Forced guess";
@@ -545,9 +556,9 @@ int SelfPlay(const std::string& target,
       std::cout << ColorGuess(guess.word, response) << std::endl;
     }
     strategy.ProcessResponse(guess.word, response);
-    ++count;
+    ++outcome.guess_count;
   }
-  return count;
+  return outcome;
 }
 
 void SelfPlayLoop(const WordList& list, const Flags& flags) {
@@ -566,8 +577,8 @@ void SelfPlayLoop(const WordList& list, const Flags& flags) {
       ValidateWord(word);
     }
     std::unique_ptr<Strategy> strategy = MakeStrategy(strategy_name, list);
-    const int guesses = SelfPlay(word, *strategy, forced_guesses, verbosity);
-    std::cout << "Guessed in " << guesses << std::endl;
+    const GameOutcome outcome = SelfPlay(word, *strategy, forced_guesses, verbosity);
+    std::cout << "Guessed in " << outcome.guess_count << std::endl;
   }
 }
 
@@ -679,8 +690,8 @@ void CollectStats(const WordList& list, const Flags& flags) {
     for (int j = 0; j < strategy_names.size(); j++) {
       progress.Report(i, word, strategy_names[j]);
       std::unique_ptr<Strategy> strategy = MakeStrategy(strategy_names[j], list);
-      const int guesses = SelfPlay(word, *strategy, forced_guesses, verbosity);
-      stats[j].guess_count_history.push_back(guesses);
+      const GameOutcome outcome = SelfPlay(word, *strategy, forced_guesses, verbosity);
+      stats[j].guess_count_history.push_back(outcome.guess_count);
     }
   }
 
