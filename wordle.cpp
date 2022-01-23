@@ -544,7 +544,7 @@ void SelfPlayLoop(const WordList& list, const Flags& flags) {
       word = list.words[rand() % list.words.size()];
       std::cout << "Secret word is: " << word << std::endl;
     }
-    std::unique_ptr<Strategy> strategy = MakeStrategy("MaxEntropy", list);
+    std::unique_ptr<Strategy> strategy = MakeStrategy(strategy_name, list);
     const int guesses = SelfPlay(word, *strategy, forced_guesses, /*display_mode=*/VERBOSE);
     std::cout << "Guessed in " << guesses << std::endl;
   }
