@@ -551,9 +551,7 @@ int SelfPlay(const std::string& target,
 
 void SelfPlayLoop(const WordList& list, const Flags& flags) {
   const std::string strategy_name = flags.Get("strategy", /*default=*/"MaxEntropy");
-
   const std::vector<std::string> forced_guesses = Split(flags.Get("forced_guesses", /*default=*/""), ',');
-
   const Verbosity verbosity = ToVerbosity(flags.Get("verbosity", "NORMAL"));
 
   while (true) {
@@ -600,6 +598,92 @@ void HumanPlayLoop(const WordList& list) {
   }
 }
 
+std::vector<std::string> Choose(const WordList& list, int N) {
+  if (N >= list.words.size()) {
+    return list.words;
+  }
+
+  std::vector<std::string> remaining = list.words;
+  std::vector<std::string> selected;
+  for (int i = 0; i < N; i++) {
+    const int choice = rand() % remaining.size();
+    selected.push_back(remaining[choice]);
+    remaining[choice] = remaining.back();
+    remaining.pop_back();
+  }
+
+  return selected;
+}
+
+class ProgressReporter {
+public:
+  ProgressReporter(Verbosity verbosity, int num_rounds)
+    : verbosity_(verbosity), num_rounds_(num_rounds) {}
+
+  void Report(int round, const std::string& word, const std::string& strategy) {
+    const std::string message = GetMessage(round, word, strategy);
+    if (verbosity_ >= NORMAL) {
+      std::cout << message << std::endl;
+    } else {
+      for (int i = 0; i < last_message_.size(); i++) {
+	std::cout << "\b";
+      }
+      std::cout << message << std::flush;
+      last_message_ = message;
+    }
+  }
+
+  void Done() {
+    if (verbosity_ < NORMAL) {
+      std::cout << std::endl;
+    }
+  }
+
+private:
+  std::string GetMessage(int round, const std::string& word, const std::string& strategy) {
+    std::ostringstream ss;
+    ss << "[" << (round + 1) << "/" << num_rounds_ << "]: " << word << " - " << strategy;
+    return ss.str();
+  }
+
+  Verbosity verbosity_;
+  int num_rounds_;
+  std::string last_message_;
+};
+
+struct StrategyStats {
+  std::vector<int> guess_count_history;
+  std::unordered_map<int, int> remaining_words_to_guesses;
+};
+
+void CollectStats(const WordList& list, const Flags& flags) {
+  const std::vector<std::string> strategy_names = Split(flags.Get("strategies"), ',');
+  const std::vector<std::string> forced_guesses = Split(flags.Get("forced_guesses", /*default=*/""), ',');
+  const Verbosity verbosity = ToVerbosity(flags.Get("verbosity", "SILENT"));
+
+  int rounds = flags.GetInt("rounds", "100");
+  if (rounds <= 0) {
+    rounds = list.words.size();
+  }
+  rounds = std::min(rounds, static_cast<int>(list.words.size()));
+
+  std::vector<std::string> words = Choose(list, rounds);
+
+  std::vector<StrategyStats> stats(strategy_names.size());
+
+  ProgressReporter progress(verbosity, rounds);
+
+  for (int i = 0; i < rounds; i++) {
+    const std::string& word = words[i];
+    for (int j = 0; j < strategy_names.size(); j++) {
+      progress.Report(i, word, strategy_names[j]);
+      std::unique_ptr<Strategy> strategy = MakeStrategy(strategy_names[j], list);
+      const int guesses = SelfPlay(word, *strategy, forced_guesses, verbosity);
+    }
+  }
+  progress.Done();
+}
+
 int main(int argc, char* argv[]) {
   const Flags flags(argc, argv);
   flags.Print();
@@ -620,6 +704,8 @@ int main(int argc, char* argv[]) {
     SelfPlayLoop(list, flags);
   } else if (mode == "human_play") {
     HumanPlayLoop(list);
+  } else if (mode == "stats") {
+    CollectStats(list, flags);
   } else if (mode == "ai_play") {
     die("Unimplemented.");
   } else {
