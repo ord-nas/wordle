@@ -33,5 +33,7 @@ for strategy, d in results.items():
             word_sum = 0
             guess_sum = 0
 
+    print("Strategy =", strategy)
     for x, y in points:
         print("%s, %s" % (x, y))
+    print()
