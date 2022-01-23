@@ -10,6 +10,7 @@
 #include <string>
 #include <time.h>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 // Print the given error message and abort.
@@ -125,15 +126,16 @@ private:
 // are in the set.
 using WordSet = std::vector<int>;
 
-// A list of words, using only characters a-z, all of the same length.
+// A list of valid guesses and valid answers, using only characters a-z, all of the same length.
 struct WordList {
-  std::vector<std::string> words;
+  std::vector<std::string> answers;
+  std::vector<std::string> valid;
 
-  // Return a set representing all the words in this list.
-  WordSet as_set() const {
+  // Return a set representing all the answer words in this list.
+  WordSet answers_as_set() const {
     WordSet set;
-    set.reserve(words.size());
-    for (int i = 0; i < words.size(); i++) {
+    set.reserve(answers.size());
+    for (int i = 0; i < answers.size(); i++) {
       set.push_back(i);
     }
     return set;
@@ -212,7 +214,7 @@ WordSet FilterWordSet(const WordList& word_list, const WordSet& input_set,
 		      const std::string& guess, const Response& response) {
   WordSet output_set;
   for (const int i : input_set) {
-    const std::string& word = word_list.words[i];
+    const std::string& word = word_list.answers[i];
     if (ScoreGuess(guess, word) == response) {
       output_set.push_back(i);
     }
@@ -320,7 +322,7 @@ std::string WordSetToString(const WordList& word_list, const WordSet& set) {
     if (!first) {
       ss << ", ";
     }
-    ss << word_list.words[i];
+    ss << word_list.answers[i];
     first = false;
   }
   ss << "}";
@@ -338,8 +340,7 @@ void ValidateWord(const std::string& word) {
   }
 }
 
-// Read a world list from the given filename.
-WordList ReadWordList(const std::string& filename) {
+std::vector<std::string> ReadWordFile(const std::string& filename) {
   // Open the file.
   std::ifstream file(filename);
   if (file.fail()) {
@@ -347,23 +348,44 @@ WordList ReadWordList(const std::string& filename) {
   }
 
   // Read in the words.
-  WordList list;
+  std::vector<std::string> list;
   std::string word;
   while (file >> word) {
     ValidateWord(word);
-    list.words.push_back(word);
+    list.push_back(word);
   }
 
   // Error checking.
-  if (list.words.size() == 0) {
-    die("Empty word list.");
+  if (list.size() == 0) {
+    die("Empty word list: " + filename);
+  }
+  std::unordered_set<std::string> set(list.begin(), list.end());
+  if (set.size() < list.size()) {
+    die("Duplicate words: " + filename);
   }
 
   return list;
 }
 
-bool InWordList(const WordList& list, const std::string& word) {
-  for (const std::string& entry : list.words) {
+// Read a world list from the given filenames.
+WordList ReadWordList(const std::string& answer_filename, const std::string& valid_filename) {
+  WordList list;
+  list.answers = ReadWordFile(answer_filename);
+  list.valid = ReadWordFile(valid_filename);
+
+  // Check that answers is a subset of valid.
+  std::unordered_set<std::string> valid_set(list.valid.begin(), list.valid.end());
+  for (const std::string& answer : list.answers) {
+    if (valid_set.count(answer) == 0) {
+      die("Word in answer set but not valid set: " + answer);
+    }
+  }
+
+  return list;
+}
+
+bool ValidGuess(const WordList& list, const std::string& word) {
+  for (const std::string& entry : list.valid) {
     if (entry == word) {
       return true;
     }
@@ -380,7 +402,7 @@ struct Guess {
 class Strategy {
 public:
   Strategy(const WordList& word_list) : word_list_(word_list) {
-    set_ = word_list_.as_set();
+    set_ = word_list_.answers_as_set();
   }
 
   // Return the next guess to make.
@@ -418,7 +440,7 @@ public:
     // Just arbitrarily pick a word that is still valid.
     Guess guess;
     const int choice = rand() % set_.size();
-    guess.word =  word_list_.words[set_[choice]];
+    guess.word =  word_list_.answers[set_[choice]];
     return guess;
   }
 };
@@ -438,7 +460,7 @@ public:
     // If we know the answer, guess it!
     if (set_.size() == 1) {
       Guess guess;
-      guess.word = word_list_.words[set_[0]];
+      guess.word = word_list_.answers[set_[0]];
       guess.reasoning = "Only one word remaining";
       return guess;
     }
@@ -448,13 +470,13 @@ public:
       -std::numeric_limits<double>::infinity() :
       std::numeric_limits<double>::infinity();
     const std::string* best_guess = nullptr;
-    for (const std::string& guess : word_list_.words) {
+    for (const std::string& guess : word_list_.valid) {
       // Consider each possible remaining word, see what response it would
       // elicit with this guess, and record the distribution over responses.
       ResponseDistribution distribution;
       distribution.fill(0);
       for (const int i : set_) {
-	const std::string& target = word_list_.words[i];
+	const std::string& target = word_list_.answers[i];
 	const Response response = ScoreGuess(guess, target);
 	++distribution[ResponseToCode(response)];
       }
@@ -486,7 +508,7 @@ private:
     ResponseDistribution distribution;
     distribution.fill(0);
     for (const int i : set_) {
-      const std::string& target = word_list_.words[i];
+      const std::string& target = word_list_.answers[i];
       const Response response = ScoreGuess(guess, target);
       ++distribution[ResponseToCode(response)];
     }
@@ -508,7 +530,7 @@ private:
       // Partition the set of possible words based on the response to our guess.
       std::unordered_map<std::string, std::vector<std::string>> response_to_targets;
       for (const int i : set_) {
-	const std::string& target = word_list_.words[i];
+	const std::string& target = word_list_.answers[i];
 	const Response response = ScoreGuess(guess, target);
 	response_to_targets[ColorGuess(guess, response)].push_back(target);
       }
@@ -633,7 +655,7 @@ void SelfPlayLoop(const WordList& list, const Flags& flags) {
     std::string word;
     std::getline(std::cin, word);
     if (word.empty()) {
-      word = list.words[rand() % list.words.size()];
+      word = list.answers[rand() % list.answers.size()];
       std::cout << "Secret word is: " << word << std::endl;
     } else {
       ValidateWord(word);
@@ -651,7 +673,7 @@ int HumanPlay(const WordList& list, const std::string& target) {
     // Get word.
     std::cout << "Enter guess: ";
     std::cin >> guess;
-    if (!InWordList(list, guess)) {
+    if (!ValidGuess(list, guess)) {
       std::cout << "Not in word list!" << std::endl;
       continue;
     }
@@ -666,18 +688,18 @@ int HumanPlay(const WordList& list, const std::string& target) {
 
 void HumanPlayLoop(const WordList& list) {
   while (true) {
-    std::string word = list.words[rand() % list.words.size()];
+    std::string word = list.answers[rand() % list.answers.size()];
     const int guesses = HumanPlay(list, word);
     std::cout << "Guessed in " << guesses << std::endl;
   }
 }
 
-std::vector<std::string> Choose(const WordList& list, int N) {
-  if (N >= list.words.size()) {
-    return list.words;
+std::vector<std::string> Choose(const std::vector<std::string>& list, int N) {
+  if (N >= list.size()) {
+    return list;
   }
 
-  std::vector<std::string> remaining = list.words;
+  std::vector<std::string> remaining = list;
   std::vector<std::string> selected;
   for (int i = 0; i < N; i++) {
     const int choice = rand() % remaining.size();
@@ -749,9 +771,9 @@ void CollectStats(const WordList& list, const Flags& flags) {
 
   // Choose some words to play.
   if (rounds <= 0) {
-    rounds = list.words.size();
+    rounds = list.answers.size();
   }
-  std::vector<std::string> words = Choose(list, rounds);
+  std::vector<std::string> words = Choose(list.answers, rounds);
   rounds = words.size();
 
   // Play each of the words through each of the strategies.
@@ -811,7 +833,9 @@ int main(int argc, char* argv[]) {
   flags.Print();
 
   // Read the word list.
-  const WordList list = ReadWordList(flags.Get("wordlist", /*default=*/"wordlist"));
+  const WordList list =
+    ReadWordList(flags.Get("answer_wordlist", /*default=*/"words/official_answer_wordlist.txt"),
+		 flags.Get("valid_wordlist", /*default=*/"words/official_valid_wordlist.txt"));
 
   // Initialize RNG.
   if (flags.Has("seed")) {
