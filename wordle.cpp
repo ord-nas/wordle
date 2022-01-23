@@ -314,6 +314,15 @@ WordList ReadWordList(const std::string& filename) {
   return list;
 }
 
+bool InWordList(const WordList& list, const std::string& word) {
+  for (const std::string& entry : list.words) {
+    if (entry == word) {
+      return true;
+    }
+  }
+  return false;
+}
+
 struct Guess {
   std::string word;
   std::string reasoning;
@@ -556,6 +565,34 @@ void SelfPlayLoop(const WordList& list, const Flags& flags) {
   }
 }
 
+int HumanPlay(const WordList& list, const std::string& target) {
+  int count = 0;
+  std::string guess;
+  while (guess != target) {
+    // Get word.
+    std::cout << "Enter guess: ";
+    std::cin >> guess;
+    if (!InWordList(list, guess)) {
+      std::cout << "Not in word list!" << std::endl;
+      continue;
+    }
+
+    // Show response.
+    Response response = ScoreGuess(guess, target);
+    std::cout << ColorGuess(guess, response) << std::endl;
+    ++count;
+  }
+  return count;
+}
+
+void HumanPlayLoop(const WordList& list) {
+  while (true) {
+    std::string word = list.words[rand() % list.words.size()];
+    const int guesses = HumanPlay(list, word);
+    std::cout << "Guessed in " << guesses << std::endl;
+  }
+}
+
 int main(int argc, char* argv[]) {
   const Flags flags(argc, argv);
   flags.Print();
@@ -574,6 +611,12 @@ int main(int argc, char* argv[]) {
   const std::string mode = flags.Get("mode", /*default=*/"self_play");
   if (mode == "self_play") {
     SelfPlayLoop(list, flags);
+  } else if (mode == "human_play") {
+    HumanPlayLoop(list);
+  } else if (mode == "ai_play") {
+    die("Unimplemented.");
+  } else {
+    die("Unrecognized mode: " + mode);
   }
 
   return 0;
