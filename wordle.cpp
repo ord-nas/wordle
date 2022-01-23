@@ -198,6 +198,12 @@ int ResponseToCode(const Response& response) {
   return code;
 }
 
+int CorrectGuessCode() {
+  Response response;
+  response.fill(EXACT_MATCH);
+  return ResponseToCode(response);
+}
+
 using ResponseDistribution = std::array<int, NUM_RESPONSES>;
 
 // Filters the given input_set (from word_list) to only those where the given
@@ -222,7 +228,7 @@ double ComputeEntropy(const ResponseDistribution& distribution) {
   }
 
   // Then tally up entropy.
-  double entropy;
+  double entropy = 0.0;
   for (const int entry : distribution) {
     if (entry > 0) {
       const double P = 1.0 * entry / N;
@@ -231,6 +237,37 @@ double ComputeEntropy(const ResponseDistribution& distribution) {
   }
 
   return entropy;
+}
+
+// The number of expected additional guesses required once we get back a
+// response according to this distribution.
+double ComputeExpectedGuesses(const ResponseDistribution& distribution) {
+  // First count the total number of entries in the distribution.
+  int N = 0;
+  for (const int entry : distribution) {
+    N += entry;
+  }
+
+  // Then tally up expected guesses.
+  const int correct_guess_code = CorrectGuessCode();
+  double guess_sum = 0.0;
+  for (int response_code = 0; response_code < distribution.size(); response_code++) {
+    const int count = distribution[response_code];
+    if (count > 0) {
+      const double P = 1.0 * count / N;
+      double expected_guesses;
+      if (response_code == correct_guess_code) {
+	expected_guesses = 0.0;
+      } else if (count == 1) {
+	expected_guesses = 1.0;
+      } else {
+	expected_guesses = 1.65 + 0.291 * log(count);
+      }
+      guess_sum += P * expected_guesses;
+    }
+  }
+
+  return guess_sum;
 }
 
 double CountEntries(const ResponseDistribution& distribution) {
@@ -446,12 +483,16 @@ private:
       ++distribution[ResponseToCode(response)];
     }
     const int possible_responses = CountEntries(distribution);
+    const double entropy = ComputeEntropy(distribution);
+    const double expected_guesses = ComputeExpectedGuesses(distribution);
 
     // Now generate the rationale.
     if (set_.size() > MAX_VERBOSE_SET_SIZE) {
       // If the set is too big, just summarize.
       ss << "Words left: " << set_.size() << std::endl;
-      ss << "Guess " << guess << " has " << possible_responses << " responses";
+      ss << "Guess " << guess << " has " << possible_responses << " responses" << std::endl;
+      ss << "Entropy = " << entropy << std::endl;
+      ss << "Expected remaining guesses = " << expected_guesses;
     } else {
       // Otherwise, go into more detail.
       ss << "Words left: " << set_.size() << " " << WordSetToString(word_list_, set_) << std::endl;
@@ -479,7 +520,9 @@ private:
 	ss << ")";
 	outer_first = false;
       }
-      ss << "}";
+      ss << "}" << std::endl;
+      ss << "Entropy = " << entropy << std::endl;
+      ss << "Expected remaining guesses = " << expected_guesses;
     }
 
     return ss.str();
@@ -496,12 +539,24 @@ public:
   }
 };
 
+class MinExpectedGuesses : public BestResponseDistribution {
+public:
+  MinExpectedGuesses(const WordList& word_list) : BestResponseDistribution(word_list) {}
+
+  bool IsMaximizer() const override { return false; }
+  double ScoreDistribution(const ResponseDistribution& distribution) const override {
+    return ComputeExpectedGuesses(distribution);
+  }
+};
+
 std::unique_ptr<Strategy> MakeStrategy(const std::string& name,
 				       const WordList& word_list) {
   if (name == "ArbitraryValid") {
     return std::make_unique<ArbitraryValid>(word_list);
   } else if (name == "MaxEntropy") {
     return std::make_unique<MaxEntropy>(word_list);
+  } else if (name == "MinExpectedGuesses") {
+    return std::make_unique<MinExpectedGuesses>(word_list);
   } else {
     die("Unrecognized strategy name: " + name);
   }
