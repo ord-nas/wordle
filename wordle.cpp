@@ -150,6 +150,7 @@ enum Outcome {
 
 constexpr int NUM_LETTERS = 5;
 constexpr int NUM_RESPONSES = 243; // 3 ^ NUM_LETTERS
+constexpr int MAX_VERBOSE_SET_SIZE = 15;
 
 // Guess outcomes for a full word. Response[i] is the outcome for guess[i].
 using Response = std::array<Outcome, NUM_LETTERS>;
@@ -392,14 +393,6 @@ public:
       return guess;
     }
 
-    // // Hack for the first round.
-    // if (set_.size() == word_list_.words.size()) {
-    //   Guess guess;
-    //   guess.word = "rates";
-    //   guess.reasoning = "Forced guess";
-    //   return guess;
-    // }
-
     // Find the best guess.
     double best_score = IsMaximizer() ?
       -std::numeric_limits<double>::infinity() :
@@ -450,7 +443,7 @@ private:
     const int possible_responses = CountEntries(distribution);
 
     // Now generate the rationale.
-    if (set_.size() > 10) {
+    if (set_.size() > MAX_VERBOSE_SET_SIZE) {
       // If the set is too big, just summarize.
       ss << "Words left: " << set_.size() << std::endl;
       ss << "Guess " << guess << " has " << possible_responses << " responses";
