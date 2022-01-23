@@ -1,6 +1,7 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <math.h>
 #include <memory>
 #include <sstream>
@@ -679,9 +680,27 @@ void CollectStats(const WordList& list, const Flags& flags) {
       progress.Report(i, word, strategy_names[j]);
       std::unique_ptr<Strategy> strategy = MakeStrategy(strategy_names[j], list);
       const int guesses = SelfPlay(word, *strategy, forced_guesses, verbosity);
+      stats[j].guess_count_history.push_back(guesses);
     }
   }
+
   progress.Done();
+  std::cout << std::endl << std::endl;
+
+  for (int j = 0; j < strategy_names.size(); j++) {
+    std::cout << strategy_names[j] << std::endl;
+    int total_guesses = 0;
+    std::map<int, int> guess_distribution;
+    for (const int guess_count : stats[j].guess_count_history) {
+      ++guess_distribution[guess_count];
+      total_guesses += guess_count;
+    }
+    std::cout << "Average guesses: " << (1.0 * total_guesses / rounds) << std::endl;
+    for (const auto& entry : guess_distribution) {
+      std::cout << entry.first << " guesses: " << (100.0 * entry.second / rounds) << " %" << std::endl;
+    }
+    std::cout << std::endl;
+  }
 }
 
 int main(int argc, char* argv[]) {
