@@ -4,9 +4,120 @@
 #include <math.h>
 #include <memory>
 #include <sstream>
+#include <stdlib.h>
 #include <string>
+#include <time.h>
 #include <unordered_map>
 #include <vector>
+
+// Print the given error message and abort.
+void die(const std::string& message) {
+  std::cout << message << std::endl;
+  exit(1);
+}
+
+// Split a string on the given delimiter character.
+std::vector<std::string> Split(const std::string& str, char delimiter) {
+  if (str.empty()) {
+    return {};
+  }
+
+  std::vector<std::string> elements;
+  std::string current;
+  for (const char c : str) {
+    if (c == delimiter) {
+      elements.push_back(current);
+      current = "";
+    } else {
+      current += c;
+    }
+  }
+  elements.push_back(current);
+  return elements;
+}
+
+int ToInt(const std::string& str) {
+  int x = 0;
+  std::size_t chars_processed = 0;
+  try {
+    x = std::stoi(str, &chars_processed);
+  } catch (...) {
+    die("Couldn't convert to int: " + str);
+  }
+
+  if (chars_processed != str.size()) {
+    die("Couldn't convert to int: " + str);
+  }
+
+  return x;
+}
+
+class Flags {
+public:
+  Flags(int argc, char* argv[]) {
+    for (int i = 1; i < argc; i++) {
+      std::string flag(argv[i]);
+
+      // Flag should start with --
+      if (flag.size() <= 2 || flag[0] != '-' || flag[1] != '-') {
+	die("Malformed flag: " + flag);
+      }
+
+      // Remove the --
+      flag.erase(0, 2);
+
+      // Flag should now have form key=value
+      std::vector<std::string> parts = Split(flag, '=');
+      if (parts.size() != 2 || parts[0].empty() || parts[1].empty()) {
+	die("Malformed flag parts: " + flag);
+      }
+
+      // Store results.
+      values_[parts[0]] = parts[1];
+    }
+  }
+
+  // Check if flags was specified.
+  bool Has(const std::string& key) const {
+    return values_.count(key) > 0;
+  }
+
+  // String accessors.
+  std::string Get(const std::string& key) const {
+    const auto it = values_.find(key);
+    if (it == values_.end()) {
+      die("Missing required flag: " + key);
+    }
+    return it->second;
+  }
+  std::string Get(const std::string& key, const std::string& default_value) const {
+    const auto it = values_.find(key);
+    if (it == values_.end()) {
+      return default_value;
+    }
+    return it->second;
+  }
+
+  // Int accessors.
+  int GetInt(const std::string& key) const {
+    return ToInt(Get(key));
+  }
+  int GetInt(const std::string& key, const std::string& default_value) const {
+    return ToInt(Get(key, default_value));
+  }
+
+  // Print all the flag values to stdout.
+  void Print() const {
+    std::cout << "Flags {" << std::endl;
+    for (const auto& entry : values_) {
+      std::cout << "    " << entry.first << " => " << entry.second << std::endl;
+    }
+    std::cout << "}" << std::endl;
+  }
+
+private:
+  std::unordered_map<std::string, std::string> values_;
+};
 
 // A set of words from a WordList, represented as a sorted list of indices that
 // are in the set.
@@ -42,12 +153,6 @@ constexpr int NUM_RESPONSES = 243; // 3 ^ NUM_LETTERS
 
 // Guess outcomes for a full word. Response[i] is the outcome for guess[i].
 using Response = std::array<Outcome, NUM_LETTERS>;
-
-// Print the given error message and abort.
-void die(const std::string& message) {
-  std::cout << message << std::endl;
-  exit(1);
-}
 
 // Score guess against target.
 Response ScoreGuess(const std::string& guess, std::string target) {
@@ -397,13 +502,22 @@ enum DisplayMode {
   VERBOSE = 2,
 };
 
-int SelfPlay(const std::string& target, Strategy& strategy, DisplayMode display_mode) {
+int SelfPlay(const std::string& target,
+	     Strategy& strategy,
+	     std::vector<std::string> forced_guesses,
+	     DisplayMode display_mode) {
   Guess guess;
   guess.word = "";
   guess.reasoning = "";
   int count = 0;
   while (guess.word != target) {
-    guess = strategy.MakeGuess();
+    if (!forced_guesses.empty()) {
+      guess.word = forced_guesses[0];
+      guess.reasoning = "Forced guess";
+      forced_guesses.erase(forced_guesses.begin());
+    } else {
+      guess = strategy.MakeGuess();
+    }
     Response response = ScoreGuess(guess.word, target);
     if (display_mode >= VERBOSE && !guess.reasoning.empty()) {
       std::cout << guess.reasoning << std::endl;
@@ -417,14 +531,44 @@ int SelfPlay(const std::string& target, Strategy& strategy, DisplayMode display_
   return count;
 }
 
-int main(int argc, char* argv[]) {
-  const WordList list = ReadWordList("wordlist");
-  for (const std::string word : {"wince", "prick", "robot", "point", "proxy", "shire", "solar", "panic", "tangy"}) {
-    // const std::string& word = list.words[rand() % list.words.size()];
-    std::cout << "Secret word is: " << word << std::endl;
+void SelfPlayLoop(const WordList& list, const Flags& flags) {
+  const std::string strategy_name = flags.Get("strategy", /*default=*/"MaxEntropy");
+
+  const std::vector<std::string> forced_guesses = Split(flags.Get("forced_guesses", /*default=*/""), ',');
+
+  while (true) {
+    std::cout << "Enter a word to play, or empty string to pick a random word: ";
+    std::string word;
+    std::getline(std::cin, word);
+    if (word.empty()) {
+      word = list.words[rand() % list.words.size()];
+      std::cout << "Secret word is: " << word << std::endl;
+    }
     std::unique_ptr<Strategy> strategy = MakeStrategy("MaxEntropy", list);
-    const int guesses = SelfPlay(word, *strategy, /*display_mode=*/VERBOSE);
+    const int guesses = SelfPlay(word, *strategy, forced_guesses, /*display_mode=*/VERBOSE);
     std::cout << "Guessed in " << guesses << std::endl;
   }
+}
+
+int main(int argc, char* argv[]) {
+  const Flags flags(argc, argv);
+  flags.Print();
+
+  // Read the word list.
+  const WordList list = ReadWordList(flags.Get("wordlist", /*default=*/"wordlist"));
+
+  // Initialize RNG.
+  if (flags.Has("seed")) {
+    srand(flags.GetInt("seed"));
+  } else {
+    srand(time(nullptr));
+  }
+
+  // Get the mode.
+  const std::string mode = flags.Get("mode", /*default=*/"self_play");
+  if (mode == "self_play") {
+    SelfPlayLoop(list, flags);
+  }
+
   return 0;
 }
