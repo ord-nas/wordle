@@ -636,9 +636,9 @@ struct GameOutcome {
 };
 
 GameOutcome SelfPlay(const std::string& target,
-	     Strategy& strategy,
-	     std::vector<std::string> forced_guesses,
-	     Verbosity verbosity) {
+		     Strategy& strategy,
+		     std::vector<std::string> forced_guesses,
+		     Verbosity verbosity) {
   Guess guess;
   GameOutcome outcome;
   while (guess.word != target) {
@@ -747,6 +747,12 @@ public:
     }
   }
 
+  void Report(int guesses) {
+    if (verbosity_ >= NORMAL) {
+      std::cout << "Guessed in " << guesses << std::endl;
+    }
+  }
+
   void Done() {
     if (verbosity_ < NORMAL) {
       std::cout << std::endl;
@@ -803,6 +809,7 @@ void CollectStats(const WordList& list, const Flags& flags) {
       progress.Report(i, word, strategy_names[j]);
       std::unique_ptr<Strategy> strategy = MakeStrategy(strategy_names[j], list);
       const GameOutcome outcome = SelfPlay(word, *strategy, forced_guesses, verbosity);
+      progress.Report(outcome.guess_count);
       // Add the outcome to overall stats.
       stats[j].guess_count_history.push_back(outcome.guess_count);
       for (int i = 0; i < outcome.remaining_word_history.size(); i++) {
