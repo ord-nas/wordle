@@ -279,6 +279,17 @@ std::string WordSetToString(const WordList& word_list, const WordSet& set) {
   return ss.str();
 }
 
+void ValidateWord(const std::string& word) {
+  if (word.size() != NUM_LETTERS) {
+    die("Got word with wrong number of letters: " + word);
+  }
+  for (char c : word) {
+    if (c < 'a' || c > 'z') {
+      die("Got invalid character in word: " + word);
+    }
+  }
+}
+
 // Read a world list from the given filename.
 WordList ReadWordList(const std::string& filename) {
   // Open the file.
@@ -291,14 +302,7 @@ WordList ReadWordList(const std::string& filename) {
   WordList list;
   std::string word;
   while (file >> word) {
-    if (word.size() != NUM_LETTERS) {
-      die("Got word with wrong number of letters: " + word);
-    }
-    for (char c : word) {
-      if (c < 'a' || c > 'z') {
-	die("Got invalid character in word: " + word);
-      }
-    }
+    ValidateWord(word);
     list.words.push_back(word);
   }
 
@@ -543,6 +547,8 @@ void SelfPlayLoop(const WordList& list, const Flags& flags) {
     if (word.empty()) {
       word = list.words[rand() % list.words.size()];
       std::cout << "Secret word is: " << word << std::endl;
+    } else {
+      ValidateWord(word);
     }
     std::unique_ptr<Strategy> strategy = MakeStrategy(strategy_name, list);
     const int guesses = SelfPlay(word, *strategy, forced_guesses, /*display_mode=*/VERBOSE);
