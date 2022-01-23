@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <fstream>
 #include <iostream>
 #include <limits>
@@ -536,8 +537,6 @@ GameOutcome SelfPlay(const std::string& target,
 	     std::vector<std::string> forced_guesses,
 	     Verbosity verbosity) {
   Guess guess;
-  guess.word = "";
-  guess.reasoning = "";
   GameOutcome outcome;
   while (guess.word != target) {
     outcome.remaining_word_history.push_back(strategy.NumRemainingWords());
@@ -665,39 +664,56 @@ private:
 
 struct StrategyStats {
   std::vector<int> guess_count_history;
-  std::unordered_map<int, int> remaining_words_to_guesses;
+  std::map<int, std::vector<int>> remaining_words_to_guesses;
 };
 
+void FinalizeStats(std::vector<StrategyStats>& stats_list) {
+  // Sort all the guess lists in remaining_words_to_guesses.
+  for (auto& stats : stats_list) {
+    for (auto& entry : stats.remaining_words_to_guesses) {
+      std::sort(entry.second.begin(), entry.second.end());
+    }
+  }
+}
+
 void CollectStats(const WordList& list, const Flags& flags) {
+  // Pull in some flag values.
   const std::vector<std::string> strategy_names = Split(flags.Get("strategies"), ',');
   const std::vector<std::string> forced_guesses = Split(flags.Get("forced_guesses", /*default=*/""), ',');
   const Verbosity verbosity = ToVerbosity(flags.Get("verbosity", "SILENT"));
-
+  const std::string filename = flags.Get("out_file", "");
   int rounds = flags.GetInt("rounds", "100");
+
+  // Choose some words to play.
   if (rounds <= 0) {
     rounds = list.words.size();
   }
-  rounds = std::min(rounds, static_cast<int>(list.words.size()));
-
   std::vector<std::string> words = Choose(list, rounds);
+  rounds = words.size();
 
-  std::vector<StrategyStats> stats(strategy_names.size());
-
+  // Play each of the words through each of the strategies.
   ProgressReporter progress(verbosity, rounds);
-
+  std::vector<StrategyStats> stats(strategy_names.size());
   for (int i = 0; i < rounds; i++) {
     const std::string& word = words[i];
     for (int j = 0; j < strategy_names.size(); j++) {
       progress.Report(i, word, strategy_names[j]);
       std::unique_ptr<Strategy> strategy = MakeStrategy(strategy_names[j], list);
       const GameOutcome outcome = SelfPlay(word, *strategy, forced_guesses, verbosity);
+      // Add the outcome to overall stats.
       stats[j].guess_count_history.push_back(outcome.guess_count);
+      for (int i = 0; i < outcome.remaining_word_history.size(); i++) {
+	const int remaining_words = outcome.remaining_word_history[i];
+	const int remaining_guesses = outcome.guess_count - i;
+	stats[j].remaining_words_to_guesses[remaining_words].push_back(remaining_guesses);
+      }
     }
   }
-
+  FinalizeStats(stats);
   progress.Done();
   std::cout << std::endl << std::endl;
 
+  // Compile a report for stdout.
   for (int j = 0; j < strategy_names.size(); j++) {
     std::cout << strategy_names[j] << std::endl;
     int total_guesses = 0;
@@ -711,6 +727,19 @@ void CollectStats(const WordList& list, const Flags& flags) {
       std::cout << entry.first << " guesses: " << (100.0 * entry.second / rounds) << " %" << std::endl;
     }
     std::cout << std::endl;
+  }
+
+  // Compile a report for file.
+  if (!filename.empty()) {
+    std::ofstream file(filename);
+    file << "strategy,remaining_words,guess_count" << std::endl;
+    for (int j = 0; j < strategy_names.size(); j++) {
+      for (const auto& entry : stats[j].remaining_words_to_guesses) {
+	for (const int guess_count : entry.second) {
+	  file << strategy_names[j] << "," << entry.first << "," << guess_count << std::endl;
+	}
+      }
+    }
   }
 }
 
