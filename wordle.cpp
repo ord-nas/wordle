@@ -649,7 +649,7 @@ private:
     return ss.str();
   }
 
-  const ResponseCache cache_;
+  const ResponseCache& cache_;
 };
 
 class MaxEntropy : public BestResponseDistribution {
