@@ -481,9 +481,10 @@ public:
   Guess MakeGuess() {
     // If we need to make a forced guess, do that.
     if (!forced_guesses_.empty()) {
-      Guess guess;
-      guess.word = forced_guesses_[0];
-      guess.reasoning = "Forced guess";
+      Guess guess = {
+	.word = forced_guesses_[0],
+	.reasoning = "Forced guess",
+      };
       forced_guesses_.erase(forced_guesses_.begin());
       return guess;
     }
@@ -495,10 +496,10 @@ public:
 
     // If we know the answer, guess it!
     if (set_.size() == 1) {
-      Guess guess;
-      guess.word = word_list_.answers[set_[0]];
-      guess.reasoning = "Only one word remaining";
-      return guess;
+      return {
+	.word = word_list_.answers[set_[0]],
+	.reasoning = "Only one word remaining",
+      };
     }
 
     // Otherwise, we actually need to do work. Delegate to subclass-specific
@@ -540,10 +541,8 @@ public:
 protected:
   Guess MakeGuessInternal() override {
     // Just arbitrarily pick a word that is still valid.
-    Guess guess;
     const int choice = rand() % set_.size();
-    guess.word =  word_list_.answers[set_[choice]];
-    return guess;
+    return { .word = word_list_.answers[set_[choice]] };
   }
 };
 
@@ -584,10 +583,10 @@ protected:
       die("All guesses have invalid scores? Bug.");
     }
 
-    Guess guess;
-    guess.word = *best_guess;
-    guess.reasoning = ExplainGuess(*best_guess);
-    return guess;
+    return {
+      .word = *best_guess,
+      .reasoning = ExplainGuess(*best_guess),
+    };
   }
 
 private:
