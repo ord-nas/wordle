@@ -472,12 +472,39 @@ struct Guess {
 // Base class for a thing that can play Wordle.
 class Strategy {
 public:
-  Strategy(const WordList& word_list) : word_list_(word_list) {
+  Strategy(const WordList& word_list, const Flags& flags) : word_list_(word_list) {
     set_ = word_list_.answers_as_set();
+    forced_guesses_ = Split(flags.Get("forced_guesses", /*default=*/""), ',');
   }
 
   // Return the next guess to make.
-  virtual Guess MakeGuess() = 0;
+  Guess MakeGuess() {
+    // If we need to make a forced guess, do that.
+    if (!forced_guesses_.empty()) {
+      Guess guess;
+      guess.word = forced_guesses_[0];
+      guess.reasoning = "Forced guess";
+      forced_guesses_.erase(forced_guesses_.begin());
+      return guess;
+    }
+
+    // If there are no more valid guesses left, something went wrong.
+    if (set_.empty()) {
+      die("Can't make a guess if there are no more possible words!");
+    }
+
+    // If we know the answer, guess it!
+    if (set_.size() == 1) {
+      Guess guess;
+      guess.word = word_list_.answers[set_[0]];
+      guess.reasoning = "Only one word remaining";
+      return guess;
+    }
+
+    // Otherwise, we actually need to do work. Delegate to subclass-specific
+    // implementation.
+    return MakeGuessInternal();
+  }
 
   // Process that the given guess got the given response.
   virtual void ProcessResponse(const std::string& guess, const Response& response) {
@@ -492,22 +519,26 @@ public:
   virtual ~Strategy() {}
 
 protected:
+  // The meat of the implementation.
+  virtual Guess MakeGuessInternal() = 0;
+
   // The full list of possible words.
   const WordList& word_list_;
 
   // The current set of words that are still possible.
   WordSet set_;
+
+  // The set of remaining forced guesses we are required to make.
+  std::vector<std::string> forced_guesses_;
 };
 
 class ArbitraryValid : public Strategy {
 public:
-  ArbitraryValid(const WordList& word_list) : Strategy(word_list) {}
+  ArbitraryValid(const WordList& word_list, const Flags& flags)
+    : Strategy(word_list, flags) {}
 
-  Guess MakeGuess() override {
-    if (set_.empty()) {
-      die("Can't make a guess if there are no more possible words!");
-    }
-
+protected:
+  Guess MakeGuessInternal() override {
     // Just arbitrarily pick a word that is still valid.
     Guess guess;
     const int choice = rand() % set_.size();
@@ -518,26 +549,15 @@ public:
 
 class BestResponseDistribution : public Strategy {
 public:
-  BestResponseDistribution(const WordList& word_list)
-    : Strategy(word_list),
+  BestResponseDistribution(const WordList& word_list, const Flags& flags)
+    : Strategy(word_list, flags),
       cache_(ResponseCacheManager::GetInstance().GetCache(word_list)) {}
 
   virtual bool IsMaximizer() const = 0;
   virtual double ScoreDistribution(const ResponseDistribution& distribution) const = 0;
 
-  Guess MakeGuess() override {
-    if (set_.empty()) {
-      die("Can't make a guess if there are no more possible words!");
-    }
-
-    // If we know the answer, guess it!
-    if (set_.size() == 1) {
-      Guess guess;
-      guess.word = word_list_.answers[set_[0]];
-      guess.reasoning = "Only one word remaining";
-      return guess;
-    }
-
+protected:
+  Guess MakeGuessInternal() override {
     // Find the best guess.
     double best_score = IsMaximizer() ?
       -std::numeric_limits<double>::infinity() :
@@ -549,9 +569,6 @@ public:
       ResponseDistribution distribution;
       distribution.fill(0);
       for (const int answer_index : set_) {
-	// const std::string& target = word_list_.answers[i];
-	// const Response response = ScoreGuess(guess, target);
-	// ++distribution[ResponseToCode(response)];
 	++distribution[cache_.Get(guess_index, answer_index)];
       }
       // Compute some score over the distribution.
@@ -637,7 +654,8 @@ private:
 
 class MaxEntropy : public BestResponseDistribution {
 public:
-  MaxEntropy(const WordList& word_list) : BestResponseDistribution(word_list) {}
+  MaxEntropy(const WordList& word_list, const Flags& flags)
+    : BestResponseDistribution(word_list, flags) {}
 
   bool IsMaximizer() const override { return true; }
   double ScoreDistribution(const ResponseDistribution& distribution) const override {
@@ -647,7 +665,8 @@ public:
 
 class MinExpectedGuesses : public BestResponseDistribution {
 public:
-  MinExpectedGuesses(const WordList& word_list) : BestResponseDistribution(word_list) {}
+  MinExpectedGuesses(const WordList& word_list, const Flags& flags)
+    : BestResponseDistribution(word_list, flags) {}
 
   bool IsMaximizer() const override { return false; }
   double ScoreDistribution(const ResponseDistribution& distribution) const override {
@@ -656,13 +675,14 @@ public:
 };
 
 std::unique_ptr<Strategy> MakeStrategy(const std::string& name,
-				       const WordList& word_list) {
+				       const WordList& word_list,
+				       const Flags& flags) {
   if (name == "ArbitraryValid") {
-    return std::make_unique<ArbitraryValid>(word_list);
+    return std::make_unique<ArbitraryValid>(word_list, flags);
   } else if (name == "MaxEntropy") {
-    return std::make_unique<MaxEntropy>(word_list);
+    return std::make_unique<MaxEntropy>(word_list, flags);
   } else if (name == "MinExpectedGuesses") {
-    return std::make_unique<MinExpectedGuesses>(word_list);
+    return std::make_unique<MinExpectedGuesses>(word_list, flags);
   } else {
     die("Unrecognized strategy name: " + name);
   }
@@ -695,19 +715,12 @@ struct GameOutcome {
 
 GameOutcome SelfPlay(const std::string& target,
 		     Strategy& strategy,
-		     std::vector<std::string> forced_guesses,
 		     Verbosity verbosity) {
   Guess guess;
   GameOutcome outcome;
   while (guess.word != target) {
     outcome.remaining_word_history.push_back(strategy.NumRemainingWords());
-    if (!forced_guesses.empty()) {
-      guess.word = forced_guesses[0];
-      guess.reasoning = "Forced guess";
-      forced_guesses.erase(forced_guesses.begin());
-    } else {
-      guess = strategy.MakeGuess();
-    }
+    guess = strategy.MakeGuess();
     Response response = ScoreGuess(guess.word, target);
     if (verbosity >= VERBOSE && !guess.reasoning.empty()) {
       std::cout << guess.reasoning << std::endl;
@@ -723,7 +736,6 @@ GameOutcome SelfPlay(const std::string& target,
 
 void SelfPlayLoop(const WordList& list, const Flags& flags) {
   const std::string strategy_name = flags.Get("strategy", /*default=*/"MinExpectedGuesses");
-  const std::vector<std::string> forced_guesses = Split(flags.Get("forced_guesses", /*default=*/""), ',');
   const Verbosity verbosity = ToVerbosity(flags.Get("verbosity", "NORMAL"));
 
   while (true) {
@@ -736,8 +748,8 @@ void SelfPlayLoop(const WordList& list, const Flags& flags) {
     } else {
       ValidateWord(word);
     }
-    std::unique_ptr<Strategy> strategy = MakeStrategy(strategy_name, list);
-    const GameOutcome outcome = SelfPlay(word, *strategy, forced_guesses, verbosity);
+    std::unique_ptr<Strategy> strategy = MakeStrategy(strategy_name, list, flags);
+    const GameOutcome outcome = SelfPlay(word, *strategy, verbosity);
     std::cout << "Guessed in " << outcome.guess_count << std::endl;
   }
 }
@@ -846,7 +858,6 @@ void FinalizeStats(std::vector<StrategyStats>& stats_list) {
 void CollectStats(const WordList& list, const Flags& flags) {
   // Pull in some flag values.
   const std::vector<std::string> strategy_names = Split(flags.Get("strategies"), ',');
-  const std::vector<std::string> forced_guesses = Split(flags.Get("forced_guesses", /*default=*/""), ',');
   const Verbosity verbosity = ToVerbosity(flags.Get("verbosity", "SILENT"));
   const std::string filename = flags.Get("out_file", "");
   int rounds = flags.GetInt("rounds", "100");
@@ -864,9 +875,9 @@ void CollectStats(const WordList& list, const Flags& flags) {
   for (int i = 0; i < rounds; i++) {
     const std::string& word = words[i];
     for (int j = 0; j < strategy_names.size(); j++) {
-      std::unique_ptr<Strategy> strategy = MakeStrategy(strategy_names[j], list);
+      std::unique_ptr<Strategy> strategy = MakeStrategy(strategy_names[j], list, flags);
       progress.Report(i, word, strategy_names[j]);
-      const GameOutcome outcome = SelfPlay(word, *strategy, forced_guesses, verbosity);
+      const GameOutcome outcome = SelfPlay(word, *strategy, verbosity);
       progress.Report(outcome.guess_count);
       // Add the outcome to overall stats.
       stats[j].guess_count_history.push_back(outcome.guess_count);
