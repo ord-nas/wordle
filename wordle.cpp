@@ -274,6 +274,16 @@ WordSet FilterWordSet(const WordList& word_list, const WordSet& input_set,
   }
   return output_set;
 }
+WordSet FilterWordSet(const WordSet& input_set, int guess_index,
+		      int response_code, const ResponseCache& cache) {
+  WordSet output_set;
+  for (const int answer_index : input_set) {
+    if (cache.Get(guess_index, answer_index) == response_code) {
+      output_set.push_back(answer_index);
+    }
+  }
+  return output_set;
+}
 
 double ComputeEntropy(const ResponseDistribution& distribution) {
   // First count the total number of entries in the distribution.
@@ -673,6 +683,237 @@ public:
   }
 };
 
+// Maintains a list of the lowest N elements seen so far.
+// Efficient for small N.
+template <typename T>
+class BottomN {
+public:
+  explicit BottomN(int n)
+    : n_(n) {
+    bottom_.reserve(n);
+  }
+
+  void Insert(double score, T item) {
+    if (bottom_.size() < n_) {
+      bottom_.emplace_back(score, item);
+    } else {
+      int highest_i = 0;
+      for (int i = 1; i < bottom_.size(); i++) {
+	if (bottom_[i].first > bottom_[highest_i].first) {
+	  highest_i = i;
+	}
+      }
+      if (score < bottom_[highest_i].first) {
+	bottom_[highest_i] = {score, item};
+      }
+    }
+  }
+
+  const std::vector<std::pair<double, T>>& result() const { return bottom_; }
+
+private:
+  int n_;
+  std::vector<std::pair<double, T>> bottom_;
+};
+
+class TreeSearch : public Strategy {
+public:
+  TreeSearch(const WordList& word_list, const Flags& flags)
+    : Strategy(word_list, flags),
+      depth_(flags.GetInt("depth", /*default=*/"1")),
+      words_per_node_(flags.GetInt("words_per_node", /*default=*/"2")),
+      cache_(ResponseCacheManager::GetInstance().GetCache(word_list)) {}
+
+protected:
+  // A word to guess and the min expected remaining guesses *after* that guess.
+  struct Move {
+    const std::string* word = nullptr;
+    double min_expected_guesses = 0.0;
+  };
+
+  Guess MakeGuessInternal() override {
+    const Move move = EvaluatePosition(set_, depth_);
+    return {
+      .word = *move.word,
+    };
+  }
+
+  Move EvaluatePosition(const WordSet& remaining_answers, int remaining_depth) const {
+    std::string outer_indent = (remaining_depth == 0) ? "    " : "";
+    std::string inner_indent = (remaining_depth == 0) ? "      " : "  ";
+    // std::cout << outer_indent << "EvaluatePosition(" << remaining_depth << ", " << WordSetToString(word_list_, remaining_answers) << ") {" << std::endl;
+
+    // Die if there are no words remaining.
+    if (remaining_answers.empty()) {
+      die("Can't make a guess if there are no more possible words!");
+    }
+
+    // Bail early if there is exactly one word remaining.
+    if (remaining_answers.size() == 1) {
+      // std::cout << inner_indent << "Only one word remaining, move=(" << word_list_.answers[remaining_answers[0]] << ", 0)" << std::endl;
+      // std::cout << outer_indent <<  "}" << std::endl;
+      return {
+	.word = &word_list_.answers[remaining_answers[0]],
+	.min_expected_guesses = 0,
+      };
+    }
+
+    // Bail early if there are exactly two words remaining.
+    if (remaining_answers.size() == 2) {
+      // std::cout << inner_indent << "Only two words remaining, move=(" << word_list_.answers[remaining_answers[0]] << ", 0.5)" << std::endl;
+      // std::cout << outer_indent <<  "}" << std::endl;
+      return {
+	.word = &word_list_.answers[remaining_answers[0]],
+	.min_expected_guesses = 0.5,
+      };
+    }
+
+    // Find the N guesses with the lowest expected remaining guesses.
+    BottomN<int> best_guesses(words_per_node_);
+    for (int guess_index = 0; guess_index < word_list_.valid.size(); guess_index++) {
+      ResponseDistribution distribution;
+      distribution.fill(0);
+      for (const int answer_index : remaining_answers) {
+	++distribution[cache_.Get(guess_index, answer_index)];
+      }
+      const double score = ComputeExpectedGuesses(distribution);
+      best_guesses.Insert(score, guess_index);
+
+      // Generate debug info.
+      // const std::string& guess = word_list_.valid[guess_index];
+      // std::unordered_map<std::string, std::vector<std::string>> response_to_targets;
+      // for (const int answer_index : remaining_answers) {
+      // 	const std::string& target = word_list_.answers[answer_index];
+      // 	const Response response = ScoreGuess(guess, target);
+      // 	response_to_targets[ColorGuess(guess, response)].push_back(target);
+      // }
+      // std::cout << inner_indent << "Guess " << guess << " has score " << score << " over distribution {";
+      // bool outer_first = true;
+      // for (const auto& entry : response_to_targets) {
+      // 	if (!outer_first) std::cout << ", ";
+      // 	std::cout << entry.first << " => (";
+      // 	bool inner_first = true;
+      // 	for (const auto& target : entry.second) {
+      // 	  if (!inner_first) std::cout << ", ";
+      // 	  std::cout << target;
+      // 	  inner_first = false;
+      // 	}
+      // 	std::cout << ")";
+      // 	outer_first = false;
+      // }
+      // std::cout << "}" << std::endl;
+    }
+
+    // If we no longer have any more remaining depth, just return the best
+    // guess.
+    if (remaining_depth <= 0) {
+      const auto& best = best_guesses.result()[0];
+      const double min_expected_guesses = best.first;
+      const int guess_index = best.second;
+      // std::cout << inner_indent << "Hit zero depth, move=(" << word_list_.valid[guess_index] << ", " << min_expected_guesses << ")" << std::endl;
+      // std::cout << outer_indent <<  "}" << std::endl;
+      return {
+	.word = &word_list_.valid[guess_index],
+	.min_expected_guesses = min_expected_guesses,
+      };
+    }
+
+    // For each of the N best guesses, evaluate the move. Keep track of the best
+    // move seen so far.
+    Move best_move = {
+      .word = nullptr,
+      .min_expected_guesses = std::numeric_limits<double>::infinity(),
+    };
+    for (const auto& entry : best_guesses.result()) {
+      const int guess_index = entry.second;
+      Move move = EvaluateGuess(guess_index, remaining_answers, remaining_depth);
+      // std::cout << inner_indent << "BestN word " << *move.word << " had initial guess score " << entry.first << ", refined score " << move.min_expected_guesses << std::endl;
+      if (move.min_expected_guesses < best_move.min_expected_guesses) {
+	best_move = move;
+      }
+      // std::cout << inner_indent << "Best so far: " << *best_move.word << std::endl;
+    }
+
+    // std::cout << outer_indent <<  "}" << std::endl;
+
+    // Make the best move.
+    return best_move;
+  }
+
+  Move EvaluateGuess(int guess_index, const WordSet& remaining_answers, int remaining_depth) const {
+    std::string outer_indent = (remaining_depth == 0) ? "      " : "  ";
+    std::string inner_indent = (remaining_depth == 0) ? "        " : "    ";
+    // std::cout << outer_indent << "EvaluateGuess(" << remaining_depth << ", " << "guess=" << word_list_.valid[guess_index] << ", " << WordSetToString(word_list_, remaining_answers) << ") {" << std::endl;
+
+    // Compute the possible responses for this guess.
+    ResponseDistribution distribution;
+    distribution.fill(0);
+    for (const int answer_index : remaining_answers) {
+      ++distribution[cache_.Get(guess_index, answer_index)];
+    }
+
+    // First count the total number of entries in the distribution.
+    int N = 0;
+    for (const int entry : distribution) {
+      N += entry;
+    }
+
+
+    // Debug stuff
+    const std::string& guess = word_list_.valid[guess_index];
+    std::unordered_map<int, std::pair<std::string, std::vector<std::string>>> response_to_targets;
+    for (const int answer_index : remaining_answers) {
+      const std::string& target = word_list_.answers[answer_index];
+      const Response response = ScoreGuess(guess, target);
+      const std::string color = ColorGuess(guess, response);
+      response_to_targets[ResponseToCode(response)].first = color;
+      response_to_targets[ResponseToCode(response)].second.push_back(target);
+    }
+
+    // Recusively explore all responses.
+    const int correct_guess_code = CorrectGuessCode();
+    double guess_sum = 0.0;
+    for (int response_code = 0; response_code < distribution.size(); response_code++) {
+      const int count = distribution[response_code];
+      if (count == 0) continue;
+
+      // // Debug stuff.
+      // const auto& entry = response_to_targets[response_code];
+      // std::cout << inner_indent << entry.first << " => (";
+      // bool first = true;
+      // for (const auto& target : entry.second) {
+      // 	if (!first) std::cout << ", ";
+      // 	std::cout << target;
+      // 	first = false;
+      // }
+      // std::cout << ")" << std::endl;
+
+      const double P = 1.0 * count / N;
+      double expected_guesses = 0.0;
+      if (response_code == correct_guess_code) {
+	expected_guesses = 0.0;
+      } else {
+	WordSet new_remaining = FilterWordSet(remaining_answers, guess_index, response_code, cache_);
+	Move move = EvaluatePosition(new_remaining, remaining_depth - 1);
+	expected_guesses = 1.0 + move.min_expected_guesses;
+      }
+      // std::cout << inner_indent << "P=" << P << ", E=" << expected_guesses << std::endl;
+      guess_sum += P * expected_guesses;
+    }
+
+    // std::cout << outer_indent << "}" << std::endl;
+    return {
+      .word = &word_list_.valid[guess_index],
+      .min_expected_guesses = guess_sum,
+    };
+  }
+
+private:
+  int depth_;
+  int words_per_node_;
+  const ResponseCache& cache_;
+};
+
 std::unique_ptr<Strategy> MakeStrategy(const std::string& name,
 				       const WordList& word_list,
 				       const Flags& flags) {
@@ -682,6 +923,8 @@ std::unique_ptr<Strategy> MakeStrategy(const std::string& name,
     return std::make_unique<MaxEntropy>(word_list, flags);
   } else if (name == "MinExpectedGuesses") {
     return std::make_unique<MinExpectedGuesses>(word_list, flags);
+  } else if (name == "TreeSearch") {
+    return std::make_unique<TreeSearch>(word_list, flags);
   } else {
     die("Unrecognized strategy name: " + name);
   }
