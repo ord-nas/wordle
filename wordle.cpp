@@ -206,6 +206,59 @@ int CorrectGuessCode() {
   return ResponseToCode(response);
 }
 
+class ResponseCache {
+public:
+  explicit ResponseCache(const WordList& word_list)
+    : num_valid_(word_list.valid.size()),
+      num_answers_(word_list.answers.size()),
+      data_(num_answers_ * num_valid_) {
+    std::cout << "Initializing ResponseCache ..." << std::endl;
+    for (int i = 0; i < word_list.valid.size(); i++) {
+      const std::string& guess = word_list.valid[i];
+      for (int j = 0; j < word_list.answers.size(); j++) {
+	const std::string& answer = word_list.answers[j];
+	const Response response = ScoreGuess(guess, answer);
+	data_[i * num_answers_ + j] = ResponseToCode(response);
+      }
+    }
+  }
+
+  int Get(int guess_index, int answer_index) const {
+    return data_[guess_index * num_answers_ + answer_index];
+  }
+
+private:
+  int num_valid_;
+  int num_answers_;
+  std::vector<int> data_;
+};
+
+class ResponseCacheManager {
+public:
+  static ResponseCacheManager& GetInstance() {
+    if (instance == nullptr) {
+      instance = new ResponseCacheManager;
+    }
+    return *instance;
+  }
+
+  const ResponseCache& GetCache(const WordList& word_list) {
+    if (caches_.count(&word_list) == 0) {
+      caches_.emplace(&word_list, ResponseCache(word_list));
+    }
+    return caches_.at(&word_list);
+  }
+
+private:
+  ResponseCacheManager() {}
+
+  static ResponseCacheManager* instance;
+
+  std::unordered_map<const WordList*, ResponseCache> caches_;
+};
+
+ResponseCacheManager* ResponseCacheManager::instance = nullptr;
+
 using ResponseDistribution = std::array<int, NUM_RESPONSES>;
 
 // Filters the given input_set (from word_list) to only those where the given
@@ -465,7 +518,9 @@ public:
 
 class BestResponseDistribution : public Strategy {
 public:
-  BestResponseDistribution(const WordList& word_list) : Strategy(word_list) {}
+  BestResponseDistribution(const WordList& word_list)
+    : Strategy(word_list),
+      cache_(ResponseCacheManager::GetInstance().GetCache(word_list)) {}
 
   virtual bool IsMaximizer() const = 0;
   virtual double ScoreDistribution(const ResponseDistribution& distribution) const = 0;
@@ -488,22 +543,23 @@ public:
       -std::numeric_limits<double>::infinity() :
       std::numeric_limits<double>::infinity();
     const std::string* best_guess = nullptr;
-    for (const std::string& guess : word_list_.valid) {
+    for (int guess_index = 0; guess_index < word_list_.valid.size(); guess_index++) {
       // Consider each possible remaining word, see what response it would
       // elicit with this guess, and record the distribution over responses.
       ResponseDistribution distribution;
       distribution.fill(0);
-      for (const int i : set_) {
-	const std::string& target = word_list_.answers[i];
-	const Response response = ScoreGuess(guess, target);
-	++distribution[ResponseToCode(response)];
+      for (const int answer_index : set_) {
+	// const std::string& target = word_list_.answers[i];
+	// const Response response = ScoreGuess(guess, target);
+	// ++distribution[ResponseToCode(response)];
+	++distribution[cache_.Get(guess_index, answer_index)];
       }
       // Compute some score over the distribution.
       const double score = ScoreDistribution(distribution);
       // If this score is the best so far, record it.
       if (IsMaximizer() ? (score > best_score) : (score < best_score)) {
       	best_score = score;
-      	best_guess = &guess;
+      	best_guess = &word_list_.valid[guess_index];
       }
     }
 
@@ -575,6 +631,8 @@ private:
 
     return ss.str();
   }
+
+  const ResponseCache cache_;
 };
 
 class MaxEntropy : public BestResponseDistribution {
@@ -806,8 +864,8 @@ void CollectStats(const WordList& list, const Flags& flags) {
   for (int i = 0; i < rounds; i++) {
     const std::string& word = words[i];
     for (int j = 0; j < strategy_names.size(); j++) {
-      progress.Report(i, word, strategy_names[j]);
       std::unique_ptr<Strategy> strategy = MakeStrategy(strategy_names[j], list);
+      progress.Report(i, word, strategy_names[j]);
       const GameOutcome outcome = SelfPlay(word, *strategy, forced_guesses, verbosity);
       progress.Report(outcome.guess_count);
       // Add the outcome to overall stats.
