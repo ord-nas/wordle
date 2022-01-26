@@ -479,6 +479,16 @@ struct Guess {
   std::string reasoning;
 };
 
+struct DecisionTreeNode {
+  explicit DecisionTreeNode(const std::string& word) : word(word) {}
+  DecisionTreeNode(const std::string& word,
+		   std::unordered_map<int, std::unique_ptr<DecisionTreeNode>> children)
+    : word(word), response_to_decision(std::move(children)) {}
+
+  std::string word;
+  std::unordered_map<int, std::unique_ptr<DecisionTreeNode>> response_to_decision;
+};
+
 // Base class for a thing that can play Wordle.
 class Strategy {
 public:
@@ -521,6 +531,11 @@ public:
   virtual void ProcessResponse(const std::string& guess, const Response& response) {
     // Remove all words that don't conform to the guess.
     set_ = FilterWordSet(word_list_, set_, guess, response);
+  }
+
+  // Build a complete decision tree for this strategy.
+  virtual std::unique_ptr<DecisionTreeNode> GetDecisionTree() {
+    die("GetDecisionTree unimplemented for this strategy.");
   }
 
   // Return the number of words that still remain as possibilities given the
@@ -724,11 +739,20 @@ public:
       words_per_node_(flags.GetInt("words_per_node", /*default=*/"2")),
       cache_(ResponseCacheManager::GetInstance().GetCache(word_list)) {}
 
+  std::unique_ptr<DecisionTreeNode> GetDecisionTree() override {
+    Move move = EvaluatePosition(set_,
+				 /*remaining_depth=*/std::numeric_limits<int>::max(),
+				 /*build_tree=*/true);
+    return std::move(move.tree);
+  }
+
 protected:
-  // A word to guess and the min expected remaining guesses *after* that guess.
+  // A word to guess and the min expected remaining guesses *after* that
+  // guess. May also contain a decision tree rooted at that guess.
   struct Move {
     const std::string* word = nullptr;
     double min_expected_guesses = 0.0;
+    std::unique_ptr<DecisionTreeNode> tree = nullptr;
   };
 
   Guess MakeGuessInternal() override {
@@ -738,7 +762,9 @@ protected:
     };
   }
 
-  Move EvaluatePosition(const WordSet& remaining_answers, int remaining_depth) const {
+  Move EvaluatePosition(const WordSet& remaining_answers,
+			int remaining_depth,
+			bool build_tree = false) const {
     // Die if there are no words remaining.
     if (remaining_answers.empty()) {
       die("Can't make a guess if there are no more possible words!");
@@ -749,6 +775,8 @@ protected:
       return {
 	.word = &word_list_.answers[remaining_answers[0]],
 	.min_expected_guesses = 0,
+	.tree = MaybeBuildSingleWordTree(build_tree,
+					 word_list_.answers[remaining_answers[0]]),
       };
     }
 
@@ -757,6 +785,9 @@ protected:
       return {
 	.word = &word_list_.answers[remaining_answers[0]],
 	.min_expected_guesses = 0.5,
+	.tree = MaybeBuildTwoWordTree(build_tree,
+				      word_list_.answers[remaining_answers[0]],
+				      word_list_.answers[remaining_answers[1]]),
       };
     }
 
@@ -775,26 +806,31 @@ protected:
     // If we no longer have any more remaining depth, just return the best
     // guess.
     if (remaining_depth <= 0) {
+      if (build_tree) {
+	die("Ran out of depth building decision tree.");
+      }
       const auto& best = best_guesses.result()[0];
       const double min_expected_guesses = best.first;
       const int guess_index = best.second;
       return {
 	.word = &word_list_.valid[guess_index],
 	.min_expected_guesses = min_expected_guesses,
+	.tree = nullptr,
       };
     }
 
     // For each of the N best guesses, evaluate the move. Keep track of the best
-    // move seen so far.
+    // move seen so far. Also maybe keep track of the full decision tree.
     Move best_move = {
       .word = nullptr,
       .min_expected_guesses = std::numeric_limits<double>::infinity(),
+      .tree = nullptr,
     };
     for (const auto& entry : best_guesses.result()) {
       const int guess_index = entry.second;
-      Move move = EvaluateGuess(guess_index, remaining_answers, remaining_depth);
+      Move move = EvaluateGuess(guess_index, remaining_answers, remaining_depth, build_tree);
       if (move.min_expected_guesses < best_move.min_expected_guesses) {
-	best_move = move;
+	best_move = std::move(move);
       }
     }
 
@@ -802,7 +838,13 @@ protected:
     return best_move;
   }
 
-  Move EvaluateGuess(int guess_index, const WordSet& remaining_answers, int remaining_depth) const {
+  Move EvaluateGuess(int guess_index,
+		     const WordSet& remaining_answers,
+		     int remaining_depth,
+		     bool build_tree = false) const {
+    // Pull out the guess.
+    const std::string& guess = word_list_.valid[guess_index];
+
     // Compute the possible responses for this guess.
     ResponseDistribution distribution;
     distribution.fill(0);
@@ -816,6 +858,9 @@ protected:
       N += entry;
     }
 
+    // Maybe start the tree.
+    std::unique_ptr<DecisionTreeNode> tree = MaybeBuildSingleWordTree(build_tree, guess);
+
     // Recusively explore all responses.
     const int correct_guess_code = CorrectGuessCode();
     double guess_sum = 0.0;
@@ -828,8 +873,11 @@ protected:
 	expected_guesses = 0.0;
       } else {
 	WordSet new_remaining = FilterWordSet(remaining_answers, guess_index, response_code, cache_);
-	Move move = EvaluatePosition(new_remaining, remaining_depth - 1);
+	Move move = EvaluatePosition(new_remaining, remaining_depth - 1, build_tree);
 	expected_guesses = 1.0 + move.min_expected_guesses;
+	if (tree != nullptr) {
+	  tree->response_to_decision[response_code] = std::move(move.tree);
+	}
       }
       guess_sum += P * expected_guesses;
     }
@@ -837,10 +885,26 @@ protected:
     return {
       .word = &word_list_.valid[guess_index],
       .min_expected_guesses = guess_sum,
+      .tree = std::move(tree),
     };
   }
 
 private:
+  std::unique_ptr<DecisionTreeNode> MaybeBuildSingleWordTree(bool build_tree, const std::string& word) const {
+    if (!build_tree) return nullptr;
+    return std::make_unique<DecisionTreeNode>(word);
+  }
+
+  std::unique_ptr<DecisionTreeNode> MaybeBuildTwoWordTree(bool build_tree,
+							  const std::string& word_1,
+							  const std::string& word_2) const {
+    if (!build_tree) return nullptr;
+    std::unordered_map<int, std::unique_ptr<DecisionTreeNode>> children;
+    int negative_response = ResponseToCode(ScoreGuess(word_1, word_2));
+    children[negative_response] = MaybeBuildSingleWordTree(build_tree, word_2);
+    return std::make_unique<DecisionTreeNode>(word_1, std::move(children));
+  }
+
   int depth_;
   int words_per_node_;
   const ResponseCache& cache_;
@@ -1096,6 +1160,46 @@ void CollectStats(const WordList& list, const Flags& flags) {
   }
 }
 
+void WriteDecisionTreeNode(const DecisionTreeNode& tree, std::ofstream& f, std::string indent) {
+  if (tree.response_to_decision.empty()) {
+    f << "(" << tree.word << ")";
+  } else {
+    f << "(" << tree.word << std::endl;
+    std::string new_indent = indent + "      ";
+    int i = 0;
+    for (const auto& entry : tree.response_to_decision) {
+      f << new_indent << "(" << entry.first << " ";
+      WriteDecisionTreeNode(*entry.second, f, new_indent);
+      f << ")";
+      if (i < tree.response_to_decision.size() - 1) {
+	f << std::endl;
+      }
+      i++;
+    }
+    f << ")";
+  }
+}
+
+void WriteDecisionTree(const DecisionTreeNode& tree, const std::string& filename) {
+  std::ofstream file(filename);
+  WriteDecisionTreeNode(tree, file, "");
+}
+
+void GenerateDecisionTree(const WordList& list, const Flags& flags) {
+  // Pull in some flag values.
+  const std::string strategy_name = flags.Get("strategy", /*default=*/"MinExpectedGuesses");
+  const std::string filename = flags.Get("out_file");
+
+  // Make the strategy.
+  std::unique_ptr<Strategy> strategy = MakeStrategy(strategy_name, list, flags);
+
+  // Get the decision tree.
+  std::unique_ptr<DecisionTreeNode> tree = strategy->GetDecisionTree();
+
+  // Write the tree out to file.
+  WriteDecisionTree(*tree, filename);
+}
+
 int main(int argc, char* argv[]) {
   const Flags flags(argc, argv);
   flags.Print();
@@ -1120,6 +1224,8 @@ int main(int argc, char* argv[]) {
     HumanPlayLoop(list);
   } else if (mode == "stats") {
     CollectStats(list, flags);
+  } else if (mode == "generate_decision_tree") {
+    GenerateDecisionTree(list, flags);
   } else if (mode == "ai_play") {
     die("Unimplemented.");
   } else {
