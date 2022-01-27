@@ -55,6 +55,17 @@ int ToInt(const std::string& str) {
   return x;
 }
 
+bool IsInt(const std::string& str) {
+  int x = 0;
+  std::size_t chars_processed = 0;
+  try {
+    x = std::stoi(str, &chars_processed);
+  } catch (...) {
+    return false;
+  }
+  return chars_processed == str.size();
+}
+
 class Flags {
 public:
   Flags(int argc, char* argv[]) {
@@ -155,6 +166,7 @@ enum Outcome {
 constexpr int NUM_LETTERS = 5;
 constexpr int NUM_RESPONSES = 243; // 3 ^ NUM_LETTERS
 constexpr int MAX_VERBOSE_SET_SIZE = 15;
+constexpr int UNIMPLEMENTED = -1;
 
 // Guess outcomes for a full word. Response[i] is the outcome for guess[i].
 using Response = std::array<Outcome, NUM_LETTERS>;
@@ -410,15 +422,18 @@ std::string WordSetToString(const WordList& word_list, const WordSet& set) {
   return ss.str();
 }
 
-void ValidateWord(const std::string& word) {
+bool ValidateWord(const std::string& word, std::string* msg) {
   if (word.size() != NUM_LETTERS) {
-    die("Got word with wrong number of letters: " + word);
+    *msg = "Got word with wrong number of letters: " + word;
+    return false;
   }
   for (char c : word) {
     if (c < 'a' || c > 'z') {
-      die("Got invalid character in word: " + word);
+      *msg = "Got invalid character in word: " + word;
+      return false;
     }
   }
+  return true;
 }
 
 std::vector<std::string> ReadWordFile(const std::string& filename) {
@@ -431,8 +446,11 @@ std::vector<std::string> ReadWordFile(const std::string& filename) {
   // Read in the words.
   std::vector<std::string> list;
   std::string word;
+  std::string error_msg;
   while (file >> word) {
-    ValidateWord(word);
+    if (!ValidateWord(word, &error_msg)) {
+      die(error_msg);
+    }
     list.push_back(word);
   }
 
@@ -492,13 +510,33 @@ struct DecisionTreeNode {
 // Base class for a thing that can play Wordle.
 class Strategy {
 public:
-  Strategy(const WordList& word_list, const Flags& flags) : word_list_(word_list) {
+  // Return the next guess to make.
+  virtual Guess MakeGuess() = 0;
+
+  // Process that the given guess got the given response.
+  virtual void ProcessResponse(const std::string& guess, const Response& response) = 0;
+
+  // Build a complete decision tree for this strategy.
+  virtual std::unique_ptr<DecisionTreeNode> GetDecisionTree() {
+    die("GetDecisionTree unimplemented for this strategy.");
+  }
+
+  // Return the number of words that still remain as possibilities given the
+  // responses so far, or UNIMPLEMENTED.
+  virtual int NumRemainingWords() const { return UNIMPLEMENTED; }
+
+  virtual ~Strategy() {}
+};
+
+class RealtimeStrategy : public Strategy {
+public:
+  RealtimeStrategy(const WordList& word_list, const Flags& flags) : word_list_(word_list) {
     set_ = word_list_.answers_as_set();
     forced_guesses_ = Split(flags.Get("forced_guesses", /*default=*/""), ',');
   }
 
   // Return the next guess to make.
-  Guess MakeGuess() {
+  Guess MakeGuess() override {
     // If we need to make a forced guess, do that.
     if (!forced_guesses_.empty()) {
       Guess guess = {
@@ -528,21 +566,14 @@ public:
   }
 
   // Process that the given guess got the given response.
-  virtual void ProcessResponse(const std::string& guess, const Response& response) {
+  void ProcessResponse(const std::string& guess, const Response& response) override {
     // Remove all words that don't conform to the guess.
     set_ = FilterWordSet(word_list_, set_, guess, response);
   }
 
-  // Build a complete decision tree for this strategy.
-  virtual std::unique_ptr<DecisionTreeNode> GetDecisionTree() {
-    die("GetDecisionTree unimplemented for this strategy.");
-  }
-
   // Return the number of words that still remain as possibilities given the
   // responses so far.
-  int NumRemainingWords() const { return set_.size(); }
-
-  virtual ~Strategy() {}
+  int NumRemainingWords() const override { return set_.size(); }
 
 protected:
   // The meat of the implementation.
@@ -558,10 +589,10 @@ protected:
   std::vector<std::string> forced_guesses_;
 };
 
-class ArbitraryValid : public Strategy {
+class ArbitraryValid : public RealtimeStrategy {
 public:
   ArbitraryValid(const WordList& word_list, const Flags& flags)
-    : Strategy(word_list, flags) {}
+    : RealtimeStrategy(word_list, flags) {}
 
 protected:
   Guess MakeGuessInternal() override {
@@ -571,10 +602,10 @@ protected:
   }
 };
 
-class BestResponseDistribution : public Strategy {
+class BestResponseDistribution : public RealtimeStrategy {
 public:
   BestResponseDistribution(const WordList& word_list, const Flags& flags)
-    : Strategy(word_list, flags),
+    : RealtimeStrategy(word_list, flags),
       cache_(ResponseCacheManager::GetInstance().GetCache(word_list)) {}
 
   virtual bool IsMaximizer() const = 0;
@@ -731,10 +762,10 @@ private:
   std::vector<std::pair<double, T>> bottom_;
 };
 
-class TreeSearch : public Strategy {
+class TreeSearch : public RealtimeStrategy {
 public:
   TreeSearch(const WordList& word_list, const Flags& flags)
-    : Strategy(word_list, flags),
+    : RealtimeStrategy(word_list, flags),
       depth_(flags.GetInt("depth", /*default=*/"1")),
       words_per_node_(flags.GetInt("words_per_node", /*default=*/"2")),
       cache_(ResponseCacheManager::GetInstance().GetCache(word_list)) {}
@@ -820,7 +851,7 @@ protected:
     }
 
     // For each of the N best guesses, evaluate the move. Keep track of the best
-    // move seen so far. Also maybe keep track of the full decision tree.
+    // move seen so far.
     Move best_move = {
       .word = nullptr,
       .min_expected_guesses = std::numeric_limits<double>::infinity(),
@@ -910,6 +941,190 @@ private:
   const ResponseCache& cache_;
 };
 
+std::string ReadFile(const std::string& filename) {
+  std::ifstream file(filename);
+  std::stringstream ss;
+  ss << file.rdbuf();
+  return ss.str();
+}
+
+enum class TokenType {
+  OPEN_PAREN,
+  CLOSE_PAREN,
+  WORD,
+  NUMBER,
+};
+
+struct Token {
+  TokenType type;
+  std::string text;
+  int int_value = 0;
+};
+
+Token ToToken(const std::string& str) {
+  Token t;
+  t.text = str;
+
+  std::string error_msg;
+  if (str == "(") {
+    t.type = TokenType::OPEN_PAREN;
+  } else if (str == ")") {
+    t.type = TokenType::CLOSE_PAREN;
+  } else if (IsInt(str)) {
+    t.type = TokenType::NUMBER;
+    t.int_value = ToInt(str);
+  } else if (ValidateWord(str, &error_msg)) {
+    t.type = TokenType::WORD;
+  } else {
+    die("Could not tokenize: " + str);
+  }
+
+  return t;
+}
+
+bool CharacterCompatibleWithToken(char a, const std::string token) {
+  if (token.empty()) {
+    return true;
+  }
+  char b = token[token.size() - 1];
+  const bool a_is_letter = a >= 'a' && a <= 'z';
+  const bool b_is_letter = b >= 'a' && b <= 'z';
+  const bool a_is_number = a >= '0' && a <= '9';
+  const bool b_is_number = b >= '0' && b <= '9';
+  return ((a_is_letter && b_is_letter) ||
+	  (a_is_number && b_is_number));
+}
+
+std::vector<Token> Tokenize(const std::string& txt) {
+  std::string current;
+  std::vector<Token> tokens;
+
+  auto maybe_add_token = [&]() {
+    if (!current.empty()) {
+      tokens.push_back(ToToken(current));
+      current = "";
+    }
+  };
+
+  for (char c : txt) {
+    if (c == ' ' || c == '\n') {
+      maybe_add_token();
+    } else if (CharacterCompatibleWithToken(c, current)) {
+      current += c;
+    } else {
+      maybe_add_token();
+      current += c;
+    }
+  }
+
+  maybe_add_token();
+
+  return tokens;
+}
+
+class TokenStream {
+public:
+  TokenStream(const std::vector<Token>& tokens) : tokens_(tokens), current_(0) {}
+
+  bool IsEmpty() const { return current_ >= tokens_.size(); }
+
+  const Token& Peek() const {
+    if (IsEmpty()) {
+      die("Tried to peek at an empty stream.");
+    }
+    return tokens_[current_];
+  }
+
+  const Token& Next() {
+    if (IsEmpty()) {
+      die("Tried to advance an empty stream.");
+    }
+    current_++;
+    return tokens_[current_ - 1];
+  }
+
+  const Token& Expect(TokenType type) {
+    const Token& t = Next();
+    if (t.type != type) {
+      die("Expected open paren, got: " + t.text);
+    }
+    return t;
+  }
+
+  const std::string& ExpectWord() {
+    return Expect(TokenType::WORD).text;
+  }
+
+  int ExpectNumber() {
+    return Expect(TokenType::NUMBER).int_value;
+  }
+
+private:
+  std::vector<Token> tokens_;
+  int current_ = 0;
+};
+
+std::unique_ptr<DecisionTreeNode> ParseDecisionTreeNode(TokenStream& stream) {
+  std::string word;
+  std::unordered_map<int, std::unique_ptr<DecisionTreeNode>> children;
+
+  stream.Expect(TokenType::OPEN_PAREN);
+  word = stream.ExpectWord();
+  while (stream.Peek().type != TokenType::CLOSE_PAREN) {
+    stream.Expect(TokenType::OPEN_PAREN);
+    const int response_code = stream.ExpectNumber();
+    auto node = ParseDecisionTreeNode(stream);
+    children[response_code] = std::move(node);
+    stream.Expect(TokenType::CLOSE_PAREN);
+  }
+  stream.Expect(TokenType::CLOSE_PAREN);
+
+  return std::make_unique<DecisionTreeNode>(word, std::move(children));
+}
+
+std::unique_ptr<DecisionTreeNode> ParseDecisionTree(const std::string& txt) {
+  std::vector<Token> tokens = Tokenize(txt);
+  TokenStream stream(tokens);
+  return ParseDecisionTreeNode(stream);
+}
+
+class DecisionTreeFile : public Strategy {
+public:
+  DecisionTreeFile(const Flags& flags) {
+    const std::string filename = flags.Get("tree_file");
+    const std::string txt = ReadFile(filename);
+    tree_ = ParseDecisionTree(txt);
+    current_node_ = tree_.get();
+  }
+
+  // Return the next guess to make.
+  Guess MakeGuess() override {
+    return {
+      .word = current_node_->word,
+    };
+  }
+
+  // Process that the given guess got the given response.
+  void ProcessResponse(const std::string& guess, const Response& response) override {
+    if (guess != current_node_->word) {
+      die("Decision tree made guess " + current_node_->word + " but got response for word " + guess);
+    }
+    int response_code = ResponseToCode(response);
+    if (response_code == CorrectGuessCode()) {
+      return;
+    }
+    auto it = current_node_->response_to_decision.find(response_code);
+    if (it == current_node_->response_to_decision.end()) {
+      die("Decision tree got unexpected response code");
+    }
+    current_node_ = it->second.get();
+  }
+
+private:
+  std::unique_ptr<DecisionTreeNode> tree_;
+  const DecisionTreeNode* current_node_;
+};
+
 std::unique_ptr<Strategy> MakeStrategy(const std::string& name,
 				       const WordList& word_list,
 				       const Flags& flags) {
@@ -921,6 +1136,8 @@ std::unique_ptr<Strategy> MakeStrategy(const std::string& name,
     return std::make_unique<MinExpectedGuesses>(word_list, flags);
   } else if (name == "TreeSearch") {
     return std::make_unique<TreeSearch>(word_list, flags);
+  } else if (name == "DecisionTreeFile") {
+    return std::make_unique<DecisionTreeFile>(flags);
   } else {
     die("Unrecognized strategy name: " + name);
   }
@@ -957,7 +1174,10 @@ GameOutcome SelfPlay(const std::string& target,
   Guess guess;
   GameOutcome outcome;
   while (guess.word != target) {
-    outcome.remaining_word_history.push_back(strategy.NumRemainingWords());
+    int remaining_words = strategy.NumRemainingWords();
+    if (remaining_words != UNIMPLEMENTED) {
+      outcome.remaining_word_history.push_back(remaining_words);
+    }
     guess = strategy.MakeGuess();
     Response response = ScoreGuess(guess.word, target);
     if (verbosity >= VERBOSE && !guess.reasoning.empty()) {
@@ -984,7 +1204,11 @@ void SelfPlayLoop(const WordList& list, const Flags& flags) {
       word = list.answers[rand() % list.answers.size()];
       std::cout << "Secret word is: " << word << std::endl;
     } else {
-      ValidateWord(word);
+      std::string error_msg;
+      if (!ValidateWord(word, &error_msg)) {
+	std::cout << error_msg << std::endl;
+	continue;
+      }
     }
     std::unique_ptr<Strategy> strategy = MakeStrategy(strategy_name, list, flags);
     const GameOutcome outcome = SelfPlay(word, *strategy, verbosity);
