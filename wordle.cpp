@@ -1046,7 +1046,7 @@ public:
   const Token& Expect(TokenType type) {
     const Token& t = Next();
     if (t.type != type) {
-      die("Expected open paren, got: " + t.text);
+      die("Got unexpected token: " + t.text);
     }
     return t;
   }
