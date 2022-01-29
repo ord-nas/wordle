@@ -218,6 +218,15 @@ int CorrectGuessCode() {
   return ResponseToCode(response);
 }
 
+bool FullyCorrect(const Response& response) {
+  for (int i = 0; i < response.size(); i++) {
+    if (response[i] != EXACT_MATCH) {
+      return false;
+    }
+  }
+  return true;
+}
+
 class ResponseCache {
 public:
   explicit ResponseCache(const WordList& word_list)
@@ -1216,6 +1225,74 @@ void SelfPlayLoop(const WordList& list, const Flags& flags) {
   }
 }
 
+bool ParseResponse(const std::string& s, Response* response) {
+  if (s.size() != NUM_LETTERS) {
+    return false;
+  }
+  for (int i = 0; i < NUM_LETTERS; i++) {
+    switch (s[i]) {
+    case 'b':
+      (*response)[i] = NO_MATCH;
+      continue;
+    case 'y':
+      (*response)[i] = PARTIAL_MATCH;
+      continue;
+    case 'g':
+      (*response)[i] = EXACT_MATCH;
+      continue;
+    default:
+      return false;
+    }
+  }
+  return true;
+}
+
+Response GetHumanResponse() {
+  std::string s;
+  Response response;
+  while (true) {
+    std::cout << "Response? ";
+    std::cin >> s;
+    if (ParseResponse(s, &response)) {
+      return response;
+    }
+    std::cout << "Could not parse response." << std::endl;
+  }
+}
+
+int AiPlay(Strategy& strategy,
+	   Verbosity verbosity) {
+  int count = 0;
+  Guess guess;
+  Response response;
+  while (!FullyCorrect(response)) {
+    ++count;
+    guess = strategy.MakeGuess();
+    std::cout << "Guess: " << guess.word << std::endl;
+    if (verbosity >= VERBOSE && !guess.reasoning.empty()) {
+      std::cout << guess.reasoning << std::endl;
+    }
+    response = GetHumanResponse();
+    if (verbosity >= NORMAL) {
+      std::cout << ColorGuess(guess.word, response) << std::endl;
+    }
+    strategy.ProcessResponse(guess.word, response);
+  }
+  return count;
+}
+
+void AiPlayLoop(const WordList& list, const Flags& flags) {
+  const std::string strategy_name = flags.Get("strategy", /*default=*/"MinExpectedGuesses");
+  const Verbosity verbosity = ToVerbosity(flags.Get("verbosity", "NORMAL"));
+
+  while (true) {
+    std::unique_ptr<Strategy> strategy = MakeStrategy(strategy_name, list, flags);
+    const int guesses = AiPlay(*strategy, verbosity);
+    std::cout << "Guessed in " << guesses << std::endl;
+    std::cout << "Starting a new game..." << std::endl;
+  }
+}
+
 int HumanPlay(const WordList& list, const std::string& target) {
   int count = 0;
   std::string guess;
@@ -1451,7 +1528,7 @@ int main(int argc, char* argv[]) {
   } else if (mode == "generate_decision_tree") {
     GenerateDecisionTree(list, flags);
   } else if (mode == "ai_play") {
-    die("Unimplemented.");
+    AiPlayLoop(list, flags);
   } else {
     die("Unrecognized mode: " + mode);
   }
