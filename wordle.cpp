@@ -1100,7 +1100,7 @@ std::unique_ptr<DecisionTreeNode> ParseDecisionTree(const std::string& txt) {
 class DecisionTreeFile : public Strategy {
 public:
   DecisionTreeFile(const Flags& flags) {
-    const std::string filename = flags.Get("tree_file");
+    const std::string filename = flags.Get("tree_file", /*default=*/"trees/tree_search_max_words_40.txt");
     const std::string txt = ReadFile(filename);
     tree_ = ParseDecisionTree(txt);
     current_node_ = tree_.get();
@@ -1202,7 +1202,7 @@ GameOutcome SelfPlay(const std::string& target,
 }
 
 void SelfPlayLoop(const WordList& list, const Flags& flags) {
-  const std::string strategy_name = flags.Get("strategy", /*default=*/"MinExpectedGuesses");
+  const std::string strategy_name = flags.Get("strategy", /*default=*/"DecisionTreeFile");
   const Verbosity verbosity = ToVerbosity(flags.Get("verbosity", "NORMAL"));
 
   while (true) {
@@ -1282,7 +1282,7 @@ int AiPlay(Strategy& strategy,
 }
 
 void AiPlayLoop(const WordList& list, const Flags& flags) {
-  const std::string strategy_name = flags.Get("strategy", /*default=*/"MinExpectedGuesses");
+  const std::string strategy_name = flags.Get("strategy", /*default=*/"DecisionTreeFile");
   const Verbosity verbosity = ToVerbosity(flags.Get("verbosity", "NORMAL"));
 
   while (true) {
@@ -1488,7 +1488,7 @@ void WriteDecisionTree(const DecisionTreeNode& tree, const std::string& filename
 
 void GenerateDecisionTree(const WordList& list, const Flags& flags) {
   // Pull in some flag values.
-  const std::string strategy_name = flags.Get("strategy", /*default=*/"MinExpectedGuesses");
+  const std::string strategy_name = flags.Get("strategy", /*default=*/"TreeSearch");
   const std::string filename = flags.Get("out_file");
 
   // Make the strategy.
