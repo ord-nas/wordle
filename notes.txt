@@ -40,3 +40,17 @@ make && ./wordle --strategy=TreeSearch --depth=100 --words_per_node=5
 
 make && ./wordle --strategy=TreeSearch --depth=100 --words_per_node=10
 > salet
+
+
+In TreeSearch, we can limit the number of *responses* we explore as well, in
+addition to the number of guesses. We should pick the responses with the highest
+probabilities, and for all the unexplored ones just use the
+count->expected_guesses formula from ComputeExpectedGuesses to approximate its
+contribution to the total expected guesses sum.
+
+We could specify the number of responses to pick with a max_num_responses and/or
+a max_explored_probability.
+
+Or maybe we need to approximate a count->expected_guesses function based on the
+values that we get from the responses we *do* explore, and then apply them to
+the ones we *don't* ?
