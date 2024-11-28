@@ -309,7 +309,7 @@ public:
     : num_valid_(word_list.valid.size()),
       num_answers_(word_list.answers.size()),
       data_(num_answers_ * num_valid_) {
-    std::cout << "Initializing ResponseCache ..." << std::endl;
+    std::cout << "Initializing ResponseCache ... " << std::flush;
     for (int i = 0; i < word_list.valid.size(); i++) {
       const std::string& guess = word_list.valid[i];
       for (int j = 0; j < word_list.answers.size(); j++) {
@@ -318,6 +318,7 @@ public:
 	data_[i * num_answers_ + j] = ResponseToCode(response);
       }
     }
+    std::cout << "Done" << std::endl;
   }
 
   int Get(int guess_index, int answer_index) const {
