@@ -244,6 +244,26 @@ int ResponseToCode(const Response& response) {
   return code;
 }
 
+// Converts the given reponse code back to a full response.
+Response CodeToResponse(int code) {
+  Response response;
+  for (int j = NUM_LETTERS - 1; j >= 0; --j) {
+    switch (code % 3) {
+    case 0:
+      response[j] = EXACT_MATCH;
+      break;
+    case 1:
+      response[j] = PARTIAL_MATCH;
+      break;
+    case 2:
+      response[j] = NO_MATCH;
+      break;
+    }
+    code /= 3;
+  }
+  return response;
+}
+
 int CorrectGuessCode() {
   Response response;
   response.fill(EXACT_MATCH);
@@ -257,6 +277,30 @@ bool FullyCorrect(const Response& response) {
     }
   }
   return true;
+}
+
+// Color the guess based on the response, using ANSI color codes.
+std::string ColorGuess(const std::string& guess, const Response& response) {
+  if (guess.size() != response.size()) {
+    die("Can't display guess and target of different sizes. guess=" + guess);
+  }
+
+  std::ostringstream ss;
+  for (int i = 0; i < guess.size(); i++) {
+    switch (response[i]) {
+      case NO_MATCH:
+	ss << "\033[37;40m" << guess[i] << "\033[0m";
+	break;
+      case EXACT_MATCH:
+	ss << "\033[37;42m" << guess[i] << "\033[0m";
+	break;
+      case PARTIAL_MATCH:
+	ss << "\033[37;43m" << guess[i] << "\033[0m";
+	break;
+    }
+  }
+
+  return ss.str();
 }
 
 class ResponseCache {
@@ -505,30 +549,6 @@ double CountEntries(const ResponseDistribution& distribution) {
     if (entry > 0) ++N;
   }
   return N;
-}
-
-// Color the guess based on the response, using ANSI color codes.
-std::string ColorGuess(const std::string& guess, const Response& response) {
-  if (guess.size() != response.size()) {
-    die("Can't display guess and target of different sizes. guess=" + guess);
-  }
-
-  std::ostringstream ss;
-  for (int i = 0; i < guess.size(); i++) {
-    switch (response[i]) {
-      case NO_MATCH:
-	ss << "\033[37;40m" << guess[i] << "\033[0m";
-	break;
-      case EXACT_MATCH:
-	ss << "\033[37;42m" << guess[i] << "\033[0m";
-	break;
-      case PARTIAL_MATCH:
-	ss << "\033[37;43m" << guess[i] << "\033[0m";
-	break;
-    }
-  }
-
-  return ss.str();
 }
 
 // Print all words in the given set.
@@ -906,14 +926,11 @@ public:
     : RealtimeStrategy(word_list, flags, game_type),
       depth_(flags.GetInt("depth", /*default=*/"1")),
       words_per_node_(flags.GetInt("words_per_node", /*default=*/"2")),
-      cache_(ResponseCacheManager::GetInstance().GetCache(word_list)) {
-    if (game_type != DEFAULT) {
-      die("TreeSearch only supports DEFAULT game type.");
-    }
-  }
+      cache_(ResponseCacheManager::GetInstance().GetCache(word_list)) {}
 
   std::unique_ptr<DecisionTreeNode> GetDecisionTree() override {
     Move move = EvaluatePosition(answer_set_,
+				 guess_set_,
 				 /*remaining_depth=*/std::numeric_limits<int>::max(),
 				 /*build_tree=*/true);
     return std::move(move.tree);
@@ -929,13 +946,14 @@ protected:
   };
 
   Guess MakeGuessInternal() override {
-    const Move move = EvaluatePosition(answer_set_, depth_);
+    const Move move = EvaluatePosition(answer_set_, guess_set_, depth_);
     return {
       .word = *move.word,
     };
   }
 
   Move EvaluatePosition(const WordSet& remaining_answers,
+			const WordSet& remaining_guesses,
 			int remaining_depth,
 			bool build_tree = false) const {
     // Die if there are no words remaining.
@@ -966,7 +984,7 @@ protected:
 
     // Find the N guesses with the lowest expected remaining guesses.
     BottomN<int> best_guesses(words_per_node_);
-    for (int guess_index = 0; guess_index < word_list_.valid.size(); guess_index++) {
+    for (int guess_index : remaining_guesses) {
       ResponseDistribution distribution;
       distribution.fill(0);
       for (const int answer_index : remaining_answers) {
@@ -1001,7 +1019,8 @@ protected:
     };
     for (const auto& entry : best_guesses.result()) {
       const int guess_index = entry.second;
-      Move move = EvaluateGuess(guess_index, remaining_answers, remaining_depth, build_tree);
+      Move move = EvaluateGuess(guess_index, remaining_answers, remaining_guesses,
+				remaining_depth, build_tree);
       if (move.min_expected_guesses < best_move.min_expected_guesses) {
 	best_move = std::move(move);
       }
@@ -1013,6 +1032,7 @@ protected:
 
   Move EvaluateGuess(int guess_index,
 		     const WordSet& remaining_answers,
+		     const WordSet& remaining_guesses,
 		     int remaining_depth,
 		     bool build_tree = false) const {
     // Pull out the guess.
@@ -1045,8 +1065,11 @@ protected:
       if (response_code == correct_guess_code) {
 	expected_guesses = 0.0;
       } else {
-	WordSet new_remaining = FilterAnswers(remaining_answers, guess_index, response_code, cache_);
-	Move move = EvaluatePosition(new_remaining, remaining_depth - 1, build_tree);
+	WordSet new_answers = FilterAnswers(remaining_answers, guess_index, response_code, cache_);
+	// TODO: consider whether optimizing this with a response cache is worth it.
+	WordSet new_guesses = FilterGuesses(word_list_.valid, remaining_guesses,
+					    guess, CodeToResponse(response_code), game_type_);
+	Move move = EvaluatePosition(new_answers, new_guesses, remaining_depth - 1, build_tree);
 	expected_guesses = 1.0 + move.min_expected_guesses;
 	if (tree != nullptr) {
 	  tree->response_to_decision[response_code] = std::move(move.tree);
@@ -1569,6 +1592,7 @@ void CollectStats(const WordList& list, const Flags& flags, const GameType game_
   for (int j = 0; j < strategy_names.size(); ++j) {
     flags_per_strategy.push_back(flags);
     if (cache_first_guess) {
+      std::cout << "Computing first guess for " << strategy_names[j] << " ... " << std::endl;
       std::unique_ptr<Strategy> strategy = MakeStrategy(strategy_names[j], list,
 							flags, game_type);
       const std::string first_guess = strategy->MakeGuess().word;
