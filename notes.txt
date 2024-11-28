@@ -14,3 +14,29 @@ Words left: 1 {robot}
 robot
 
 Okay fine, but why didn't you guess one of robot or rebut instead of aaron? That would have narrowed it down the same way but you have a 50% chance of getting it on the first try!
+
+
+TreeSearch
+
+First word findings:
+
+make && ./wordle --strategy=TreeSearch --words_per_node=2
+> roate
+
+make && ./wordle --strategy=TreeSearch --words_per_node=10
+> trace
+
+make && ./wordle --strategy=TreeSearch --words_per_node=20
+> trace
+
+make && ./wordle --strategy=TreeSearch --words_per_node=50
+> slate
+
+make && ./wordle --strategy=TreeSearch --depth=100 --words_per_node=2
+> roate
+
+make && ./wordle --strategy=TreeSearch --depth=100 --words_per_node=5
+> reast
+
+make && ./wordle --strategy=TreeSearch --depth=100 --words_per_node=10
+> salet
