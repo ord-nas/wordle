@@ -66,6 +66,15 @@ bool IsInt(const std::string& str) {
   return chars_processed == str.size();
 }
 
+bool ToBool(const std::string& str) {
+  if (str == "true") {
+    return true;
+  } else if (str == "false") {
+    return false;
+  }
+  die("Couldn't convert to bool: " + str);
+}
+
 class Flags {
 public:
   Flags(int argc, char* argv[]) {
@@ -118,6 +127,19 @@ public:
   }
   int GetInt(const std::string& key, const std::string& default_value) const {
     return ToInt(Get(key, default_value));
+  }
+
+  // Bool accessors.
+  bool GetBool(const std::string& key) const {
+    return ToBool(Get(key));
+  }
+  bool GetBool(const std::string& key, const std::string& default_value) const {
+    return ToBool(Get(key, default_value));
+  }
+
+  // Setter.
+  void Set(const std::string& key, const std::string& value) {
+    values_[key] = value;
   }
 
   // Print all the flag values to stdout.
@@ -1518,6 +1540,11 @@ void CollectStats(const WordList& list, const Flags& flags, const GameType game_
   const Verbosity verbosity = ToVerbosity(flags.Get("verbosity", "SILENT"));
   const std::string filename = flags.Get("out_file", "");
   int rounds = flags.GetInt("rounds", "100");
+  // We only cache the first guess if requested, and only if we don't already
+  // have a forced first guess.
+  const bool cache_first_guess =
+    flags.GetBool("cache_first_guess", "false") &&
+    !flags.Has("forced_guesses");
 
   // Choose some words to play.
   if (rounds <= 0) {
@@ -1526,6 +1553,21 @@ void CollectStats(const WordList& list, const Flags& flags, const GameType game_
   std::vector<std::string> words = Choose(list.answers, rounds);
   rounds = words.size();
 
+  // If requested, compute and cache the first guess that each strategy will
+  // make. We do this by adjusting the forced_guesses flag for each strategy.
+  // This is pretty hacky.
+  std::vector<Flags> flags_per_strategy;
+  for (int j = 0; j < strategy_names.size(); ++j) {
+    flags_per_strategy.push_back(flags);
+    if (cache_first_guess) {
+      std::unique_ptr<Strategy> strategy = MakeStrategy(strategy_names[j], list,
+							flags, game_type);
+      const std::string first_guess = strategy->MakeGuess().word;
+      Flags& adjusted_flags = flags_per_strategy.back();
+      adjusted_flags.Set("forced_guesses", first_guess);
+    }
+  }
+
   // Play each of the words through each of the strategies.
   ProgressReporter progress(verbosity, rounds);
   std::vector<StrategyStats> stats(strategy_names.size());
@@ -1533,7 +1575,7 @@ void CollectStats(const WordList& list, const Flags& flags, const GameType game_
     const std::string& word = words[i];
     for (int j = 0; j < strategy_names.size(); j++) {
       std::unique_ptr<Strategy> strategy = MakeStrategy(strategy_names[j], list,
-							flags, game_type);
+							flags_per_strategy[j], game_type);
       progress.Report(i, word, strategy_names[j]);
       const GameOutcome outcome = SelfPlay(word, *strategy, verbosity);
       progress.Report(outcome.guess_count);
