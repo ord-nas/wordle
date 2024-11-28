@@ -151,6 +151,16 @@ struct WordList {
     }
     return set;
   }
+
+  // Return a set representing all the valid guess words in this list.
+  WordSet guesses_as_set() const {
+    WordSet set;
+    set.reserve(valid.size());
+    for (int i = 0; i < valid.size(); i++) {
+      set.push_back(i);
+    }
+    return set;
+  }
 };
 
 // Possible per-letter guess outcomes.
@@ -282,19 +292,94 @@ ResponseCacheManager* ResponseCacheManager::instance = nullptr;
 
 using ResponseDistribution = std::array<int, NUM_RESPONSES>;
 
-// Filters the given input_set (from word_list) to only those where the given
-// guess would have elicited the given response.
-WordSet FilterWordSet(const WordList& word_list, const WordSet& input_set,
-		      const std::string& guess, const Response& response) {
-  WordSet output_set;
-  for (const int i : input_set) {
-    const std::string& word = word_list.answers[i];
-    if (ScoreGuess(guess, word) == response) {
-      output_set.push_back(i);
+enum GameType {
+  // Any guess is valid at any time.
+  DEFAULT = 0,
+  // Wordle hard mode rules: (1) if you get a green letter clue, all subsequent
+  // guesses must use that letter in that location; (2) if you get a yellow
+  // letter clue, all subsequent guesses must use that letter somewhere (can
+  // even be in the same location). More precisely, the total number of x
+  // letters in subsequent guesses must be greater than or equal to the total
+  // number of *colored* x letters in the response.
+  HARD = 1,
+  // You can only guess words that could still be valid as the answer, according
+  // to all previous guesses.
+  STRICT = 2,
+};
+
+GameType ToGameType(const std::string& str) {
+  if (str == "DEFAULT") {
+    return DEFAULT;
+  } else if (str == "HARD") {
+    return HARD;
+  } else if (str == "STRICT") {
+    return STRICT;
+  } else {
+    die("Unrecognized game type: " + str);
+  }
+}
+
+// Supposing we are in hard mode and the given guess received the given
+// response, returns true if new_guess is a valid followup guess.
+bool IsValidHardModeGuess(const std::string& guess, const Response& response,
+			  std::string new_guess) {
+  for (int i = 0; i < NUM_LETTERS; i++) {
+    if (response[i] == EXACT_MATCH) {
+      if (new_guess[i] != guess[i]) {
+	return false;
+      }
+    } else if (response[i] == PARTIAL_MATCH) {
+      // Try to find a partial match.
+      bool found_match = false;
+      for (int j = 0; j < NUM_LETTERS; j++) {
+	if (response[j] != EXACT_MATCH && new_guess[j] == guess[i]) {
+	  new_guess[j] = '.';
+	  found_match = true;
+	  break;
+	}
+      }
+      if (!found_match) {
+	return false;
+      }
     }
   }
-  return output_set;
+  return true;
 }
+
+// Filters the given input_set (from word_list) to only those where the given
+// guess would have elicited the given response.
+WordSet FilterWordSet(const std::vector<std::string>& word_list,
+		      const WordSet& input_set, const std::string& guess,
+		      const Response& response, const GameType game_type = STRICT) {
+
+  switch (game_type) {
+  case DEFAULT:
+    return input_set;
+  case HARD: {
+    WordSet output_set;
+    for (const int i : input_set) {
+      const std::string& word = word_list[i];
+      if (IsValidHardModeGuess(guess, response, word)) {
+	output_set.push_back(i);
+      }
+    }
+    return output_set;
+  }
+  case STRICT: {
+    WordSet output_set;
+    for (const int i : input_set) {
+      const std::string& word = word_list[i];
+      if (ScoreGuess(guess, word) == response) {
+	output_set.push_back(i);
+      }
+    }
+    return output_set;
+  }
+  }
+}
+
+// Optimized version of the above that only supports GameType=DEFAULT and uses a
+// ResponseCache to speed up processing.
 WordSet FilterWordSet(const WordSet& input_set, int guess_index,
 		      int response_code, const ResponseCache& cache) {
   WordSet output_set;
@@ -416,7 +501,8 @@ std::string ColorGuess(const std::string& guess, const Response& response) {
 }
 
 // Print all words in the given set.
-std::string WordSetToString(const WordList& word_list, const WordSet& set) {
+std::string WordSetToString(const std::vector<std::string>& word_list,
+			    const WordSet& set) {
   std::ostringstream ss;
   bool first = true;
   ss << "{";
@@ -424,7 +510,7 @@ std::string WordSetToString(const WordList& word_list, const WordSet& set) {
     if (!first) {
       ss << ", ";
     }
-    ss << word_list.answers[i];
+    ss << word_list[i];
     first = false;
   }
   ss << "}";
@@ -492,9 +578,10 @@ WordList ReadWordList(const std::string& answer_filename, const std::string& val
   return list;
 }
 
-bool ValidGuess(const WordList& list, const std::string& word) {
-  for (const std::string& entry : list.valid) {
-    if (entry == word) {
+bool ValidGuess(const std::vector<std::string>& word_list,
+		const WordSet& remaining_guesses, const std::string& word) {
+  for (const int i : remaining_guesses) {
+    if (word_list[i] == word) {
       return true;
     }
   }
@@ -539,8 +626,10 @@ public:
 
 class RealtimeStrategy : public Strategy {
 public:
-  RealtimeStrategy(const WordList& word_list, const Flags& flags) : word_list_(word_list) {
-    set_ = word_list_.answers_as_set();
+  RealtimeStrategy(const WordList& word_list, const Flags& flags, GameType game_type)
+    : word_list_(word_list), game_type_(game_type) {
+    answer_set_ = word_list_.answers_as_set();
+    guess_set_ = word_list_.guesses_as_set();
     forced_guesses_ = Split(flags.Get("forced_guesses", /*default=*/""), ',');
   }
 
@@ -557,14 +646,14 @@ public:
     }
 
     // If there are no more valid guesses left, something went wrong.
-    if (set_.empty()) {
+    if (answer_set_.empty()) {
       die("Can't make a guess if there are no more possible words!");
     }
 
     // If we know the answer, guess it!
-    if (set_.size() == 1) {
+    if (answer_set_.size() == 1) {
       return {
-	.word = word_list_.answers[set_[0]],
+	.word = word_list_.answers[answer_set_[0]],
 	.reasoning = "Only one word remaining",
       };
     }
@@ -576,13 +665,15 @@ public:
 
   // Process that the given guess got the given response.
   void ProcessResponse(const std::string& guess, const Response& response) override {
-    // Remove all words that don't conform to the guess.
-    set_ = FilterWordSet(word_list_, set_, guess, response);
+    // Remove all answers that don't conform to the response.
+    answer_set_ = FilterWordSet(word_list_.answers, answer_set_, guess, response);
+    // Remove all guesses that don't conform to the response (and game type).
+    guess_set_ = FilterWordSet(word_list_.valid, guess_set_, guess, response, game_type_);
   }
 
   // Return the number of words that still remain as possibilities given the
   // responses so far.
-  int NumRemainingWords() const override { return set_.size(); }
+  int NumRemainingWords() const override { return answer_set_.size(); }
 
 protected:
   // The meat of the implementation.
@@ -591,8 +682,14 @@ protected:
   // The full list of possible words.
   const WordList& word_list_;
 
+  // The game type.
+  GameType game_type_;
+
   // The current set of words that are still possible.
-  WordSet set_;
+  WordSet answer_set_;
+
+  // The current set of guesses that are still possible.
+  WordSet guess_set_;
 
   // The set of remaining forced guesses we are required to make.
   std::vector<std::string> forced_guesses_;
@@ -600,21 +697,21 @@ protected:
 
 class ArbitraryValid : public RealtimeStrategy {
 public:
-  ArbitraryValid(const WordList& word_list, const Flags& flags)
-    : RealtimeStrategy(word_list, flags) {}
+  ArbitraryValid(const WordList& word_list, const Flags& flags, GameType game_type)
+    : RealtimeStrategy(word_list, flags, game_type) {}
 
 protected:
   Guess MakeGuessInternal() override {
     // Just arbitrarily pick a word that is still valid.
-    const int choice = rand() % set_.size();
-    return { .word = word_list_.answers[set_[choice]] };
+    const int choice = rand() % answer_set_.size();
+    return { .word = word_list_.answers[answer_set_[choice]] };
   }
 };
 
 class BestResponseDistribution : public RealtimeStrategy {
 public:
-  BestResponseDistribution(const WordList& word_list, const Flags& flags)
-    : RealtimeStrategy(word_list, flags),
+  BestResponseDistribution(const WordList& word_list, const Flags& flags, GameType game_type)
+    : RealtimeStrategy(word_list, flags, game_type),
       cache_(ResponseCacheManager::GetInstance().GetCache(word_list)) {}
 
   virtual bool IsMaximizer() const = 0;
@@ -627,12 +724,12 @@ protected:
       -std::numeric_limits<double>::infinity() :
       std::numeric_limits<double>::infinity();
     const std::string* best_guess = nullptr;
-    for (int guess_index = 0; guess_index < word_list_.valid.size(); guess_index++) {
+    for (int guess_index : guess_set_) {
       // Consider each possible remaining word, see what response it would
       // elicit with this guess, and record the distribution over responses.
       ResponseDistribution distribution;
       distribution.fill(0);
-      for (const int answer_index : set_) {
+      for (const int answer_index : answer_set_) {
 	++distribution[cache_.Get(guess_index, answer_index)];
       }
       // Compute some score over the distribution.
@@ -662,7 +759,7 @@ private:
     // guess.
     ResponseDistribution distribution;
     distribution.fill(0);
-    for (const int i : set_) {
+    for (const int i : answer_set_) {
       const std::string& target = word_list_.answers[i];
       const Response response = ScoreGuess(guess, target);
       ++distribution[ResponseToCode(response)];
@@ -672,19 +769,20 @@ private:
     const double expected_guesses = ComputeExpectedGuesses(distribution);
 
     // Now generate the rationale.
-    if (set_.size() > MAX_VERBOSE_SET_SIZE) {
+    if (answer_set_.size() > MAX_VERBOSE_SET_SIZE) {
       // If the set is too big, just summarize.
-      ss << "Words left: " << set_.size() << std::endl;
+      ss << "Words left: " << answer_set_.size() << std::endl;
       ss << "Guess " << guess << " has " << possible_responses << " responses" << std::endl;
       ss << "Entropy = " << entropy << std::endl;
       ss << "Expected remaining guesses = " << expected_guesses;
     } else {
       // Otherwise, go into more detail.
-      ss << "Words left: " << set_.size() << " " << WordSetToString(word_list_, set_) << std::endl;
+      ss << "Words left: " << answer_set_.size() << " "
+	 << WordSetToString(word_list_.answers, answer_set_) << std::endl;
 
       // Partition the set of possible words based on the response to our guess.
       std::unordered_map<std::string, std::vector<std::string>> response_to_targets;
-      for (const int i : set_) {
+      for (const int i : answer_set_) {
 	const std::string& target = word_list_.answers[i];
 	const Response response = ScoreGuess(guess, target);
 	response_to_targets[ColorGuess(guess, response)].push_back(target);
@@ -718,8 +816,8 @@ private:
 
 class MaxEntropy : public BestResponseDistribution {
 public:
-  MaxEntropy(const WordList& word_list, const Flags& flags)
-    : BestResponseDistribution(word_list, flags) {}
+  MaxEntropy(const WordList& word_list, const Flags& flags, GameType game_type)
+    : BestResponseDistribution(word_list, flags, game_type) {}
 
   bool IsMaximizer() const override { return true; }
   double ScoreDistribution(const ResponseDistribution& distribution) const override {
@@ -729,8 +827,8 @@ public:
 
 class MinExpectedGuesses : public BestResponseDistribution {
 public:
-  MinExpectedGuesses(const WordList& word_list, const Flags& flags)
-    : BestResponseDistribution(word_list, flags) {}
+  MinExpectedGuesses(const WordList& word_list, const Flags& flags, GameType game_type)
+    : BestResponseDistribution(word_list, flags, game_type) {}
 
   bool IsMaximizer() const override { return false; }
   double ScoreDistribution(const ResponseDistribution& distribution) const override {
@@ -773,14 +871,18 @@ private:
 
 class TreeSearch : public RealtimeStrategy {
 public:
-  TreeSearch(const WordList& word_list, const Flags& flags)
-    : RealtimeStrategy(word_list, flags),
+  TreeSearch(const WordList& word_list, const Flags& flags, GameType game_type)
+    : RealtimeStrategy(word_list, flags, game_type),
       depth_(flags.GetInt("depth", /*default=*/"1")),
       words_per_node_(flags.GetInt("words_per_node", /*default=*/"2")),
-      cache_(ResponseCacheManager::GetInstance().GetCache(word_list)) {}
+      cache_(ResponseCacheManager::GetInstance().GetCache(word_list)) {
+    if (game_type != DEFAULT) {
+      die("TreeSearch only supports DEFAULT game type.");
+    }
+  }
 
   std::unique_ptr<DecisionTreeNode> GetDecisionTree() override {
-    Move move = EvaluatePosition(set_,
+    Move move = EvaluatePosition(answer_set_,
 				 /*remaining_depth=*/std::numeric_limits<int>::max(),
 				 /*build_tree=*/true);
     return std::move(move.tree);
@@ -796,7 +898,7 @@ protected:
   };
 
   Guess MakeGuessInternal() override {
-    const Move move = EvaluatePosition(set_, depth_);
+    const Move move = EvaluatePosition(answer_set_, depth_);
     return {
       .word = *move.word,
     };
@@ -1136,16 +1238,25 @@ private:
 
 std::unique_ptr<Strategy> MakeStrategy(const std::string& name,
 				       const WordList& word_list,
-				       const Flags& flags) {
+				       const Flags& flags,
+				       const GameType game_type) {
   if (name == "ArbitraryValid") {
-    return std::make_unique<ArbitraryValid>(word_list, flags);
+    return std::make_unique<ArbitraryValid>(word_list, flags, game_type);
   } else if (name == "MaxEntropy") {
-    return std::make_unique<MaxEntropy>(word_list, flags);
+    return std::make_unique<MaxEntropy>(word_list, flags, game_type);
   } else if (name == "MinExpectedGuesses") {
-    return std::make_unique<MinExpectedGuesses>(word_list, flags);
+    return std::make_unique<MinExpectedGuesses>(word_list, flags, game_type);
   } else if (name == "TreeSearch") {
-    return std::make_unique<TreeSearch>(word_list, flags);
+    return std::make_unique<TreeSearch>(word_list, flags, game_type);
   } else if (name == "DecisionTreeFile") {
+    static bool once = false;
+    if (!once) {
+      std::cout << "Warning: when using DecisionTreeFile strategy, you must ensure "
+		<< "the game_type used to create the decision tree matches the one "
+		<< "that you currently want to play!"
+		<< std::endl;
+      once = true;
+    }
     return std::make_unique<DecisionTreeFile>(flags);
   } else {
     die("Unrecognized strategy name: " + name);
@@ -1201,7 +1312,7 @@ GameOutcome SelfPlay(const std::string& target,
   return outcome;
 }
 
-void SelfPlayLoop(const WordList& list, const Flags& flags) {
+void SelfPlayLoop(const WordList& list, const Flags& flags, const GameType game_type) {
   const std::string strategy_name = flags.Get("strategy", /*default=*/"DecisionTreeFile");
   const Verbosity verbosity = ToVerbosity(flags.Get("verbosity", "NORMAL"));
 
@@ -1219,7 +1330,8 @@ void SelfPlayLoop(const WordList& list, const Flags& flags) {
 	continue;
       }
     }
-    std::unique_ptr<Strategy> strategy = MakeStrategy(strategy_name, list, flags);
+    std::unique_ptr<Strategy> strategy = MakeStrategy(strategy_name, list,
+						      flags, game_type);
     const GameOutcome outcome = SelfPlay(word, *strategy, verbosity);
     std::cout << "Guessed in " << outcome.guess_count << std::endl;
   }
@@ -1281,27 +1393,30 @@ int AiPlay(Strategy& strategy,
   return count;
 }
 
-void AiPlayLoop(const WordList& list, const Flags& flags) {
+void AiPlayLoop(const WordList& list, const Flags& flags, const GameType game_type) {
   const std::string strategy_name = flags.Get("strategy", /*default=*/"DecisionTreeFile");
   const Verbosity verbosity = ToVerbosity(flags.Get("verbosity", "NORMAL"));
 
   while (true) {
-    std::unique_ptr<Strategy> strategy = MakeStrategy(strategy_name, list, flags);
+    std::unique_ptr<Strategy> strategy = MakeStrategy(strategy_name, list,
+						      flags, game_type);
     const int guesses = AiPlay(*strategy, verbosity);
     std::cout << "Guessed in " << guesses << std::endl;
     std::cout << "Starting a new game..." << std::endl;
   }
 }
 
-int HumanPlay(const WordList& list, const std::string& target) {
+int HumanPlay(const WordList& list, const std::string& target,
+	      const GameType game_type) {
+  WordSet remaining_guesses = list.guesses_as_set();
   int count = 0;
   std::string guess;
   while (guess != target) {
     // Get word.
     std::cout << "Enter guess: ";
     std::cin >> guess;
-    if (!ValidGuess(list, guess)) {
-      std::cout << "Not in word list!" << std::endl;
+    if (!ValidGuess(list.valid, remaining_guesses, guess)) {
+      std::cout << "Not a valid guess!" << std::endl;
       continue;
     }
 
@@ -1309,14 +1424,17 @@ int HumanPlay(const WordList& list, const std::string& target) {
     Response response = ScoreGuess(guess, target);
     std::cout << ColorGuess(guess, response) << std::endl;
     ++count;
+
+    // Update the valid guess list.
+    remaining_guesses  = FilterWordSet(list.valid, remaining_guesses, guess, response, game_type);
   }
   return count;
 }
 
-void HumanPlayLoop(const WordList& list) {
+void HumanPlayLoop(const WordList& list, const GameType game_type) {
   while (true) {
     std::string word = list.answers[rand() % list.answers.size()];
-    const int guesses = HumanPlay(list, word);
+    const int guesses = HumanPlay(list, word, game_type);
     std::cout << "Guessed in " << guesses << std::endl;
   }
 }
@@ -1394,7 +1512,7 @@ void FinalizeStats(std::vector<StrategyStats>& stats_list) {
   }
 }
 
-void CollectStats(const WordList& list, const Flags& flags) {
+void CollectStats(const WordList& list, const Flags& flags, const GameType game_type) {
   // Pull in some flag values.
   const std::vector<std::string> strategy_names = Split(flags.Get("strategies"), ',');
   const Verbosity verbosity = ToVerbosity(flags.Get("verbosity", "SILENT"));
@@ -1414,7 +1532,8 @@ void CollectStats(const WordList& list, const Flags& flags) {
   for (int i = 0; i < rounds; i++) {
     const std::string& word = words[i];
     for (int j = 0; j < strategy_names.size(); j++) {
-      std::unique_ptr<Strategy> strategy = MakeStrategy(strategy_names[j], list, flags);
+      std::unique_ptr<Strategy> strategy = MakeStrategy(strategy_names[j], list,
+							flags, game_type);
       progress.Report(i, word, strategy_names[j]);
       const GameOutcome outcome = SelfPlay(word, *strategy, verbosity);
       progress.Report(outcome.guess_count);
@@ -1486,13 +1605,15 @@ void WriteDecisionTree(const DecisionTreeNode& tree, const std::string& filename
   WriteDecisionTreeNode(tree, file, "");
 }
 
-void GenerateDecisionTree(const WordList& list, const Flags& flags) {
+void GenerateDecisionTree(const WordList& list, const Flags& flags,
+			  const GameType game_type) {
   // Pull in some flag values.
   const std::string strategy_name = flags.Get("strategy", /*default=*/"TreeSearch");
   const std::string filename = flags.Get("out_file");
 
   // Make the strategy.
-  std::unique_ptr<Strategy> strategy = MakeStrategy(strategy_name, list, flags);
+  std::unique_ptr<Strategy> strategy = MakeStrategy(strategy_name, list,
+						    flags, game_type);
 
   // Get the decision tree.
   std::unique_ptr<DecisionTreeNode> tree = strategy->GetDecisionTree();
@@ -1517,18 +1638,19 @@ int main(int argc, char* argv[]) {
     srand(time(nullptr));
   }
 
-  // Get the mode.
+  // Get the game type and mode.
+  const GameType game_type = ToGameType(flags.Get("game_type", /*default=*/"DEFAULT"));
   const std::string mode = flags.Get("mode", /*default=*/"self_play");
   if (mode == "self_play") {
-    SelfPlayLoop(list, flags);
+    SelfPlayLoop(list, flags, game_type);
   } else if (mode == "human_play") {
-    HumanPlayLoop(list);
+    HumanPlayLoop(list, game_type);
   } else if (mode == "stats") {
-    CollectStats(list, flags);
+    CollectStats(list, flags, game_type);
   } else if (mode == "generate_decision_tree") {
-    GenerateDecisionTree(list, flags);
+    GenerateDecisionTree(list, flags, game_type);
   } else if (mode == "ai_play") {
-    AiPlayLoop(list, flags);
+    AiPlayLoop(list, flags, game_type);
   } else {
     die("Unrecognized mode: " + mode);
   }
