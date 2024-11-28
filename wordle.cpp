@@ -368,12 +368,11 @@ bool IsValidHardModeGuess(const std::string& guess, const Response& response,
   return true;
 }
 
-// Filters the given input_set (from word_list) to only those where the given
-// guess would have elicited the given response.
-WordSet FilterWordSet(const std::vector<std::string>& word_list,
+// Filters the given input_set (from word_list) to only those *guesses* that are
+// valid after the given (guess, response) pair.
+WordSet FilterGuesses(const std::vector<std::string>& word_list,
 		      const WordSet& input_set, const std::string& guess,
-		      const Response& response, const GameType game_type = STRICT) {
-
+		      const Response& response, const GameType game_type) {
   switch (game_type) {
   case DEFAULT:
     return input_set;
@@ -400,9 +399,19 @@ WordSet FilterWordSet(const std::vector<std::string>& word_list,
   }
 }
 
+// Filters the given input_set (from word_list) to only those *answers* that are
+// valid after the given (guess, response) pair.
+WordSet FilterAnswers(const std::vector<std::string>& word_list,
+		      const WordSet& input_set, const std::string& guess,
+		      const Response& response) {
+  // This is the same as STRICT guess filtering.
+  return FilterGuesses(word_list, input_set, guess, response, STRICT);
+}
+
+
 // Optimized version of the above that only supports GameType=DEFAULT and uses a
 // ResponseCache to speed up processing.
-WordSet FilterWordSet(const WordSet& input_set, int guess_index,
+WordSet FilterAnswers(const WordSet& input_set, int guess_index,
 		      int response_code, const ResponseCache& cache) {
   WordSet output_set;
   for (const int answer_index : input_set) {
@@ -688,9 +697,9 @@ public:
   // Process that the given guess got the given response.
   void ProcessResponse(const std::string& guess, const Response& response) override {
     // Remove all answers that don't conform to the response.
-    answer_set_ = FilterWordSet(word_list_.answers, answer_set_, guess, response);
+    answer_set_ = FilterAnswers(word_list_.answers, answer_set_, guess, response);
     // Remove all guesses that don't conform to the response (and game type).
-    guess_set_ = FilterWordSet(word_list_.valid, guess_set_, guess, response, game_type_);
+    guess_set_ = FilterGuesses(word_list_.valid, guess_set_, guess, response, game_type_);
   }
 
   // Return the number of words that still remain as possibilities given the
@@ -1036,7 +1045,7 @@ protected:
       if (response_code == correct_guess_code) {
 	expected_guesses = 0.0;
       } else {
-	WordSet new_remaining = FilterWordSet(remaining_answers, guess_index, response_code, cache_);
+	WordSet new_remaining = FilterAnswers(remaining_answers, guess_index, response_code, cache_);
 	Move move = EvaluatePosition(new_remaining, remaining_depth - 1, build_tree);
 	expected_guesses = 1.0 + move.min_expected_guesses;
 	if (tree != nullptr) {
@@ -1448,7 +1457,7 @@ int HumanPlay(const WordList& list, const std::string& target,
     ++count;
 
     // Update the valid guess list.
-    remaining_guesses  = FilterWordSet(list.valid, remaining_guesses, guess, response, game_type);
+    remaining_guesses  = FilterGuesses(list.valid, remaining_guesses, guess, response, game_type);
   }
   return count;
 }
