@@ -331,31 +331,258 @@ private:
   std::vector<int> data_;
 };
 
-class ResponseCacheManager {
+bool ValidateWord(const std::string& word, std::string* msg) {
+  if (word.size() != NUM_LETTERS) {
+    *msg = "Got word with wrong number of letters: " + word;
+    return false;
+  }
+  for (char c : word) {
+    if (c < 'a' || c > 'z') {
+      *msg = "Got invalid character in word: " + word;
+      return false;
+    }
+  }
+  return true;
+}
+
+std::vector<std::string> ReadWordFile(const std::string& filename) {
+  // Open the file.
+  std::ifstream file(filename);
+  if (file.fail()) {
+    die("Could not open wordlist: " + filename);
+  }
+
+  // Read in the words.
+  std::vector<std::string> list;
+  std::string word;
+  std::string error_msg;
+  while (file >> word) {
+    if (!ValidateWord(word, &error_msg)) {
+      die(error_msg);
+    }
+    list.push_back(word);
+  }
+
+  // Error checking.
+  if (list.size() == 0) {
+    die("Empty word list: " + filename);
+  }
+  std::unordered_set<std::string> set(list.begin(), list.end());
+  if (set.size() < list.size()) {
+    die("Duplicate words: " + filename);
+  }
+
+  return list;
+}
+
+// Read a world list from the given filenames.
+WordList ReadWordList(const std::string& answer_filename, const std::string& valid_filename) {
+  WordList list;
+  list.answers = ReadWordFile(answer_filename);
+  list.valid = ReadWordFile(valid_filename);
+
+  // Check that answers is a subset of valid.
+  std::unordered_set<std::string> valid_set(list.valid.begin(), list.valid.end());
+  for (const std::string& answer : list.answers) {
+    if (valid_set.count(answer) == 0) {
+      die("Word in answer set but not valid set: " + answer);
+    }
+  }
+
+  return list;
+}
+
+struct DecisionTreeNode {
+  explicit DecisionTreeNode(const std::string& word) : word(word) {}
+  DecisionTreeNode(const std::string& word,
+		   std::unordered_map<int, std::unique_ptr<DecisionTreeNode>> children)
+    : word(word), response_to_decision(std::move(children)) {}
+
+  std::string word;
+  std::unordered_map<int, std::unique_ptr<DecisionTreeNode>> response_to_decision;
+};
+
+std::string ReadFile(const std::string& filename) {
+  std::ifstream file(filename);
+  std::stringstream ss;
+  ss << file.rdbuf();
+  return ss.str();
+}
+
+enum class TokenType {
+  OPEN_PAREN,
+  CLOSE_PAREN,
+  WORD,
+  NUMBER,
+};
+
+struct Token {
+  TokenType type;
+  std::string text;
+  int int_value = 0;
+};
+
+Token ToToken(const std::string& str) {
+  Token t;
+  t.text = str;
+
+  std::string error_msg;
+  if (str == "(") {
+    t.type = TokenType::OPEN_PAREN;
+  } else if (str == ")") {
+    t.type = TokenType::CLOSE_PAREN;
+  } else if (IsInt(str)) {
+    t.type = TokenType::NUMBER;
+    t.int_value = ToInt(str);
+  } else if (ValidateWord(str, &error_msg)) {
+    t.type = TokenType::WORD;
+  } else {
+    die("Could not tokenize: " + str);
+  }
+
+  return t;
+}
+
+bool CharacterCompatibleWithToken(char a, const std::string token) {
+  if (token.empty()) {
+    return true;
+  }
+  char b = token[token.size() - 1];
+  const bool a_is_letter = a >= 'a' && a <= 'z';
+  const bool b_is_letter = b >= 'a' && b <= 'z';
+  const bool a_is_number = a >= '0' && a <= '9';
+  const bool b_is_number = b >= '0' && b <= '9';
+  return ((a_is_letter && b_is_letter) ||
+	  (a_is_number && b_is_number));
+}
+
+std::vector<Token> Tokenize(const std::string& txt) {
+  std::string current;
+  std::vector<Token> tokens;
+
+  auto maybe_add_token = [&]() {
+    if (!current.empty()) {
+      tokens.push_back(ToToken(current));
+      current = "";
+    }
+  };
+
+  for (char c : txt) {
+    if (c == ' ' || c == '\n') {
+      maybe_add_token();
+    } else if (CharacterCompatibleWithToken(c, current)) {
+      current += c;
+    } else {
+      maybe_add_token();
+      current += c;
+    }
+  }
+
+  maybe_add_token();
+
+  return tokens;
+}
+
+class TokenStream {
 public:
-  static ResponseCacheManager& GetInstance() {
+  TokenStream(const std::vector<Token>& tokens) : tokens_(tokens), current_(0) {}
+
+  bool IsEmpty() const { return current_ >= tokens_.size(); }
+
+  const Token& Peek() const {
+    if (IsEmpty()) {
+      die("Tried to peek at an empty stream.");
+    }
+    return tokens_[current_];
+  }
+
+  const Token& Next() {
+    if (IsEmpty()) {
+      die("Tried to advance an empty stream.");
+    }
+    current_++;
+    return tokens_[current_ - 1];
+  }
+
+  const Token& Expect(TokenType type) {
+    const Token& t = Next();
+    if (t.type != type) {
+      die("Got unexpected token: " + t.text);
+    }
+    return t;
+  }
+
+  const std::string& ExpectWord() {
+    return Expect(TokenType::WORD).text;
+  }
+
+  int ExpectNumber() {
+    return Expect(TokenType::NUMBER).int_value;
+  }
+
+private:
+  std::vector<Token> tokens_;
+  int current_ = 0;
+};
+
+std::unique_ptr<DecisionTreeNode> ParseDecisionTreeNode(TokenStream& stream) {
+  std::string word;
+  std::unordered_map<int, std::unique_ptr<DecisionTreeNode>> children;
+
+  stream.Expect(TokenType::OPEN_PAREN);
+  word = stream.ExpectWord();
+  while (stream.Peek().type != TokenType::CLOSE_PAREN) {
+    stream.Expect(TokenType::OPEN_PAREN);
+    const int response_code = stream.ExpectNumber();
+    auto node = ParseDecisionTreeNode(stream);
+    children[response_code] = std::move(node);
+    stream.Expect(TokenType::CLOSE_PAREN);
+  }
+  stream.Expect(TokenType::CLOSE_PAREN);
+
+  return std::make_unique<DecisionTreeNode>(word, std::move(children));
+}
+
+std::unique_ptr<DecisionTreeNode> ParseDecisionTree(const std::string& txt) {
+  std::vector<Token> tokens = Tokenize(txt);
+  TokenStream stream(tokens);
+  return ParseDecisionTreeNode(stream);
+}
+
+class ResourceManager {
+public:
+  static ResourceManager& GetInstance() {
     if (instance == nullptr) {
-      instance = new ResponseCacheManager;
+      instance = new ResourceManager;
     }
     return *instance;
   }
 
-  const ResponseCache& GetCache(const WordList& word_list) {
-    if (caches_.count(&word_list) == 0) {
-      caches_.emplace(&word_list, ResponseCache(word_list));
+  const ResponseCache& GetResponseCache(const WordList& word_list) {
+    if (response_caches_.count(&word_list) == 0) {
+      response_caches_.emplace(&word_list, ResponseCache(word_list));
     }
-    return caches_.at(&word_list);
+    return response_caches_.at(&word_list);
+  }
+
+  const DecisionTreeNode& GetDecisionTree(const std::string& filename) {
+    if (decision_trees_.count(filename) == 0) {
+      decision_trees_.emplace(filename, ParseDecisionTree(ReadFile(filename)));
+    }
+    return *decision_trees_.at(filename);
   }
 
 private:
-  ResponseCacheManager() {}
+  ResourceManager() {}
 
-  static ResponseCacheManager* instance;
+  static ResourceManager* instance;
 
-  std::unordered_map<const WordList*, ResponseCache> caches_;
+  std::unordered_map<const WordList*, ResponseCache> response_caches_;
+
+  std::unordered_map<std::string, std::unique_ptr<DecisionTreeNode>> decision_trees_;
 };
 
-ResponseCacheManager* ResponseCacheManager::instance = nullptr;
+ResourceManager* ResourceManager::instance = nullptr;
 
 using ResponseDistribution = std::array<int, NUM_RESPONSES>;
 
@@ -454,8 +681,8 @@ WordSet FilterAnswers(const std::vector<std::string>& word_list,
 }
 
 
-// Optimized version of the above that only supports GameType=DEFAULT and uses a
-// ResponseCache to speed up processing.
+// Optimized version of the above that uses a ResponseCache to speed up
+// processing.
 WordSet FilterAnswers(const WordSet& input_set, int guess_index,
 		      int response_code, const ResponseCache& cache) {
   WordSet output_set;
@@ -569,67 +796,6 @@ std::string WordSetToString(const std::vector<std::string>& word_list,
   return ss.str();
 }
 
-bool ValidateWord(const std::string& word, std::string* msg) {
-  if (word.size() != NUM_LETTERS) {
-    *msg = "Got word with wrong number of letters: " + word;
-    return false;
-  }
-  for (char c : word) {
-    if (c < 'a' || c > 'z') {
-      *msg = "Got invalid character in word: " + word;
-      return false;
-    }
-  }
-  return true;
-}
-
-std::vector<std::string> ReadWordFile(const std::string& filename) {
-  // Open the file.
-  std::ifstream file(filename);
-  if (file.fail()) {
-    die("Could not open wordlist: " + filename);
-  }
-
-  // Read in the words.
-  std::vector<std::string> list;
-  std::string word;
-  std::string error_msg;
-  while (file >> word) {
-    if (!ValidateWord(word, &error_msg)) {
-      die(error_msg);
-    }
-    list.push_back(word);
-  }
-
-  // Error checking.
-  if (list.size() == 0) {
-    die("Empty word list: " + filename);
-  }
-  std::unordered_set<std::string> set(list.begin(), list.end());
-  if (set.size() < list.size()) {
-    die("Duplicate words: " + filename);
-  }
-
-  return list;
-}
-
-// Read a world list from the given filenames.
-WordList ReadWordList(const std::string& answer_filename, const std::string& valid_filename) {
-  WordList list;
-  list.answers = ReadWordFile(answer_filename);
-  list.valid = ReadWordFile(valid_filename);
-
-  // Check that answers is a subset of valid.
-  std::unordered_set<std::string> valid_set(list.valid.begin(), list.valid.end());
-  for (const std::string& answer : list.answers) {
-    if (valid_set.count(answer) == 0) {
-      die("Word in answer set but not valid set: " + answer);
-    }
-  }
-
-  return list;
-}
-
 bool ValidGuess(const std::vector<std::string>& word_list,
 		const WordSet& remaining_guesses, const std::string& word) {
   for (const int i : remaining_guesses) {
@@ -643,16 +809,6 @@ bool ValidGuess(const std::vector<std::string>& word_list,
 struct Guess {
   std::string word;
   std::string reasoning;
-};
-
-struct DecisionTreeNode {
-  explicit DecisionTreeNode(const std::string& word) : word(word) {}
-  DecisionTreeNode(const std::string& word,
-		   std::unordered_map<int, std::unique_ptr<DecisionTreeNode>> children)
-    : word(word), response_to_decision(std::move(children)) {}
-
-  std::string word;
-  std::unordered_map<int, std::unique_ptr<DecisionTreeNode>> response_to_decision;
 };
 
 // Base class for a thing that can play Wordle.
@@ -764,7 +920,7 @@ class BestResponseDistribution : public RealtimeStrategy {
 public:
   BestResponseDistribution(const WordList& word_list, const Flags& flags, GameType game_type)
     : RealtimeStrategy(word_list, flags, game_type),
-      cache_(ResponseCacheManager::GetInstance().GetCache(word_list)) {}
+      cache_(ResourceManager::GetInstance().GetResponseCache(word_list)) {}
 
   virtual bool IsMaximizer() const = 0;
   virtual double ScoreDistribution(const ResponseDistribution& distribution) const = 0;
@@ -927,7 +1083,7 @@ public:
     : RealtimeStrategy(word_list, flags, game_type),
       depth_(flags.GetInt("depth", /*default=*/"1")),
       words_per_node_(flags.GetInt("words_per_node", /*default=*/"2")),
-      cache_(ResponseCacheManager::GetInstance().GetCache(word_list)) {}
+      cache_(ResourceManager::GetInstance().GetResponseCache(word_list)) {}
 
   std::unique_ptr<DecisionTreeNode> GetDecisionTree() override {
     Move move = EvaluatePosition(answer_set_,
@@ -1107,160 +1263,11 @@ private:
   const ResponseCache& cache_;
 };
 
-std::string ReadFile(const std::string& filename) {
-  std::ifstream file(filename);
-  std::stringstream ss;
-  ss << file.rdbuf();
-  return ss.str();
-}
-
-enum class TokenType {
-  OPEN_PAREN,
-  CLOSE_PAREN,
-  WORD,
-  NUMBER,
-};
-
-struct Token {
-  TokenType type;
-  std::string text;
-  int int_value = 0;
-};
-
-Token ToToken(const std::string& str) {
-  Token t;
-  t.text = str;
-
-  std::string error_msg;
-  if (str == "(") {
-    t.type = TokenType::OPEN_PAREN;
-  } else if (str == ")") {
-    t.type = TokenType::CLOSE_PAREN;
-  } else if (IsInt(str)) {
-    t.type = TokenType::NUMBER;
-    t.int_value = ToInt(str);
-  } else if (ValidateWord(str, &error_msg)) {
-    t.type = TokenType::WORD;
-  } else {
-    die("Could not tokenize: " + str);
-  }
-
-  return t;
-}
-
-bool CharacterCompatibleWithToken(char a, const std::string token) {
-  if (token.empty()) {
-    return true;
-  }
-  char b = token[token.size() - 1];
-  const bool a_is_letter = a >= 'a' && a <= 'z';
-  const bool b_is_letter = b >= 'a' && b <= 'z';
-  const bool a_is_number = a >= '0' && a <= '9';
-  const bool b_is_number = b >= '0' && b <= '9';
-  return ((a_is_letter && b_is_letter) ||
-	  (a_is_number && b_is_number));
-}
-
-std::vector<Token> Tokenize(const std::string& txt) {
-  std::string current;
-  std::vector<Token> tokens;
-
-  auto maybe_add_token = [&]() {
-    if (!current.empty()) {
-      tokens.push_back(ToToken(current));
-      current = "";
-    }
-  };
-
-  for (char c : txt) {
-    if (c == ' ' || c == '\n') {
-      maybe_add_token();
-    } else if (CharacterCompatibleWithToken(c, current)) {
-      current += c;
-    } else {
-      maybe_add_token();
-      current += c;
-    }
-  }
-
-  maybe_add_token();
-
-  return tokens;
-}
-
-class TokenStream {
-public:
-  TokenStream(const std::vector<Token>& tokens) : tokens_(tokens), current_(0) {}
-
-  bool IsEmpty() const { return current_ >= tokens_.size(); }
-
-  const Token& Peek() const {
-    if (IsEmpty()) {
-      die("Tried to peek at an empty stream.");
-    }
-    return tokens_[current_];
-  }
-
-  const Token& Next() {
-    if (IsEmpty()) {
-      die("Tried to advance an empty stream.");
-    }
-    current_++;
-    return tokens_[current_ - 1];
-  }
-
-  const Token& Expect(TokenType type) {
-    const Token& t = Next();
-    if (t.type != type) {
-      die("Got unexpected token: " + t.text);
-    }
-    return t;
-  }
-
-  const std::string& ExpectWord() {
-    return Expect(TokenType::WORD).text;
-  }
-
-  int ExpectNumber() {
-    return Expect(TokenType::NUMBER).int_value;
-  }
-
-private:
-  std::vector<Token> tokens_;
-  int current_ = 0;
-};
-
-std::unique_ptr<DecisionTreeNode> ParseDecisionTreeNode(TokenStream& stream) {
-  std::string word;
-  std::unordered_map<int, std::unique_ptr<DecisionTreeNode>> children;
-
-  stream.Expect(TokenType::OPEN_PAREN);
-  word = stream.ExpectWord();
-  while (stream.Peek().type != TokenType::CLOSE_PAREN) {
-    stream.Expect(TokenType::OPEN_PAREN);
-    const int response_code = stream.ExpectNumber();
-    auto node = ParseDecisionTreeNode(stream);
-    children[response_code] = std::move(node);
-    stream.Expect(TokenType::CLOSE_PAREN);
-  }
-  stream.Expect(TokenType::CLOSE_PAREN);
-
-  return std::make_unique<DecisionTreeNode>(word, std::move(children));
-}
-
-std::unique_ptr<DecisionTreeNode> ParseDecisionTree(const std::string& txt) {
-  std::vector<Token> tokens = Tokenize(txt);
-  TokenStream stream(tokens);
-  return ParseDecisionTreeNode(stream);
-}
-
 class DecisionTreeFile : public Strategy {
 public:
   DecisionTreeFile(const Flags& flags) {
     const std::string filename = flags.Get("tree_file", /*default=*/"trees/tree_search_max_words_40.txt");
-    const std::string txt = ReadFile(filename);
-    tree_ = ParseDecisionTree(txt);
-    current_node_ = tree_.get();
+    current_node_ = &ResourceManager::GetInstance().GetDecisionTree(filename);
   }
 
   // Return the next guess to make.
@@ -1287,7 +1294,6 @@ public:
   }
 
 private:
-  std::unique_ptr<DecisionTreeNode> tree_;
   const DecisionTreeNode* current_node_;
 };
 
