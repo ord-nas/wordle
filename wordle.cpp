@@ -199,6 +199,7 @@ constexpr int NUM_LETTERS = 5;
 constexpr int NUM_RESPONSES = 243; // 3 ^ NUM_LETTERS
 constexpr int MAX_VERBOSE_SET_SIZE = 15;
 constexpr int UNIMPLEMENTED = -1;
+constexpr int MAX_GUESSES = 6;
 
 // Guess outcomes for a full word. Response[i] is the outcome for guess[i].
 using Response = std::array<Outcome, NUM_LETTERS>;
@@ -835,7 +836,7 @@ public:
 class RealtimeStrategy : public Strategy {
 public:
   RealtimeStrategy(const WordList& word_list, const Flags& flags, GameType game_type)
-    : word_list_(word_list), game_type_(game_type) {
+    : word_list_(word_list), game_type_(game_type), processed_responses_(0) {
     answer_set_ = word_list_.answers_as_set();
     guess_set_ = word_list_.guesses_as_set();
     forced_guesses_ = Split(flags.Get("forced_guesses", /*default=*/""), ',');
@@ -873,6 +874,8 @@ public:
 
   // Process that the given guess got the given response.
   void ProcessResponse(const std::string& guess, const Response& response) override {
+    ++processed_responses_;
+
     // Remove all answers that don't conform to the response.
     answer_set_ = FilterAnswers(word_list_.answers, answer_set_, guess, response);
     // Remove all guesses that don't conform to the response (and game type).
@@ -901,6 +904,9 @@ protected:
 
   // The set of remaining forced guesses we are required to make.
   std::vector<std::string> forced_guesses_;
+
+  // The number of responses processed so far.
+  int processed_responses_;
 };
 
 class ArbitraryValid : public RealtimeStrategy {
@@ -1077,33 +1083,71 @@ private:
   std::vector<std::pair<double, T>> bottom_;
 };
 
+enum OptimizationMetric {
+  // Minimize the average number of guesses.
+  MIN_EXPECTED_GUESSES = 0,
+
+  // Minimize the worst case (most guesses), then the average number of guesses.
+  MIN_WORST_CASE = 1,
+
+  // Minimize the number of losses (score > MAX_GUESSES), then the average
+  // number of guesses.
+  MIN_LOSSES = 2,
+};
+
+OptimizationMetric ToOptimizationMetric(const std::string& str) {
+  if (str == "MIN_EXPECTED_GUESSES") {
+    return MIN_EXPECTED_GUESSES;
+  } else if (str == "MIN_WORST_CASE") {
+    return MIN_WORST_CASE;
+  } else if (str == "MIN_LOSSES") {
+    return MIN_LOSSES;
+  } else {
+    die("Unrecognized optimization metric: " + str);
+  }
+}
+
+bool more_debug = false;
+
 class TreeSearch : public RealtimeStrategy {
 public:
   TreeSearch(const WordList& word_list, const Flags& flags, GameType game_type)
     : RealtimeStrategy(word_list, flags, game_type),
       depth_(flags.GetInt("depth", /*default=*/"1")),
       words_per_node_(flags.GetInt("words_per_node", /*default=*/"2")),
+      optimization_metric_(ToOptimizationMetric(flags.Get("optimization_metric", /*default=*/"MIN_EXPECTED_GUESSES"))),
       cache_(ResourceManager::GetInstance().GetResponseCache(word_list)) {}
 
   std::unique_ptr<DecisionTreeNode> GetDecisionTree() override {
+    // We need max depth to generate a decision tree.
+    int original_depth = depth_;
+    depth_ = std::numeric_limits<int>::max();
+
     Move move = EvaluatePosition(answer_set_,
 				 guess_set_,
-				 /*remaining_depth=*/std::numeric_limits<int>::max(),
+				 /*remaining_depth=*/depth_,
 				 /*build_tree=*/true);
+
+    // Restore original depth.
+    depth_ = original_depth;
+
     return std::move(move.tree);
   }
 
 protected:
-  // A word to guess and the min expected remaining guesses *after* that
-  // guess. May also contain a decision tree rooted at that guess.
+  // A word to guess and the best values for expected/max remaining guesses
+  // *after* that guess. May also contain a decision tree rooted at that guess.
   struct Move {
     const std::string* word = nullptr;
-    double min_expected_guesses = 0.0;
+    double best_expected_guesses = 0.0;
+    double max_expected_guesses = 0.0;
+    int num_losses = 0;
     std::unique_ptr<DecisionTreeNode> tree = nullptr;
   };
 
   Guess MakeGuessInternal() override {
-    const Move move = EvaluatePosition(answer_set_, guess_set_, depth_);
+    // std::cout << "MakeGuessInternal" << std::endl;
+    const Move move = EvaluatePosition(answer_set_, guess_set_, depth_, /*build_tree=*/false, /*debug=*/more_debug);
     return {
       .word = *move.word,
     };
@@ -1112,7 +1156,11 @@ protected:
   Move EvaluatePosition(const WordSet& remaining_answers,
 			const WordSet& remaining_guesses,
 			int remaining_depth,
-			bool build_tree = false) const {
+			bool build_tree = false,
+			bool debug = false) const {
+    // Figure out what round we're on.
+    int guesses_so_far = processed_responses_ + depth_ - remaining_depth;
+
     // Die if there are no words remaining.
     if (remaining_answers.empty()) {
       die("Can't make a guess if there are no more possible words!");
@@ -1120,22 +1168,33 @@ protected:
 
     // Bail early if there is exactly one word remaining.
     if (remaining_answers.size() == 1) {
+      const int num_losses = (guesses_so_far >= MAX_GUESSES ? 1 : 0);
+      if (debug) std::cout << "Hmmm bailing with size 1" << std::endl;
       return {
 	.word = &word_list_.answers[remaining_answers[0]],
-	.min_expected_guesses = 0,
+	.best_expected_guesses = 0,
+	.max_expected_guesses = 0,
+	.num_losses = num_losses,
 	.tree = MaybeBuildSingleWordTree(build_tree,
-					 word_list_.answers[remaining_answers[0]]),
+					 word_list_.answers[remaining_answers[0]]),// + ":" + std::to_string(num_losses) + ":1w"), // DEBUG
       };
     }
 
     // Bail early if there are exactly two words remaining.
     if (remaining_answers.size() == 2) {
+      const int num_losses = (guesses_so_far >= MAX_GUESSES ? 2 :
+			      guesses_so_far >= MAX_GUESSES - 1 ? 1 :
+			      0);
+      const int num_second_word_losses = (guesses_so_far >= MAX_GUESSES - 1 ? 1 : 0);
+      if (debug) std::cout << "Hmmm bailing with size 2" << std::endl;
       return {
 	.word = &word_list_.answers[remaining_answers[0]],
-	.min_expected_guesses = 0.5,
+	.best_expected_guesses = 0.5,
+	.max_expected_guesses = 1.0,
+	.num_losses = num_losses,
 	.tree = MaybeBuildTwoWordTree(build_tree,
-				      word_list_.answers[remaining_answers[0]],
-				      word_list_.answers[remaining_answers[1]]),
+				      word_list_.answers[remaining_answers[0]],// + ":" + std::to_string(num_losses) + ":2w", // DEBUG
+				      word_list_.answers[remaining_answers[1]]),// + ":" + std::to_string(num_second_word_losses) + ":2w"),
       };
     }
 
@@ -1158,11 +1217,17 @@ protected:
 	die("Ran out of depth building decision tree.");
       }
       const auto& best = best_guesses.result()[0];
-      const double min_expected_guesses = best.first;
+      const double best_expected_guesses = best.first;
       const int guess_index = best.second;
+      if (debug) std::cout << "Hmmm bailing with no remaining depth" << std::endl;
       return {
 	.word = &word_list_.valid[guess_index],
-	.min_expected_guesses = min_expected_guesses,
+	.best_expected_guesses = best_expected_guesses,
+	// We don't have a good way of evaluating max expected guesses so just
+	// set it equal to best_expected_guesses.
+	.max_expected_guesses = best_expected_guesses,
+	// We don't have a good way of setting num losses so just set it to 0.
+	.num_losses = 0,
 	.tree = nullptr,
       };
     }
@@ -1171,17 +1236,22 @@ protected:
     // move seen so far.
     Move best_move = {
       .word = nullptr,
-      .min_expected_guesses = std::numeric_limits<double>::infinity(),
+      .best_expected_guesses = std::numeric_limits<double>::infinity(),
+      .max_expected_guesses = std::numeric_limits<double>::infinity(),
+      .num_losses = std::numeric_limits<int>::max(),
       .tree = nullptr,
     };
+    if (debug) std::cout << "start choices debug" << std::endl;
     for (const auto& entry : best_guesses.result()) {
       const int guess_index = entry.second;
       Move move = EvaluateGuess(guess_index, remaining_answers, remaining_guesses,
 				remaining_depth, build_tree);
-      if (move.min_expected_guesses < best_move.min_expected_guesses) {
+      if (debug) std::cout << "guess " << word_list_.valid[guess_index] << " with score " << entry.first << " num losses " << move.num_losses << std::endl;
+      if (LhsMoveIsBetter(move, best_move)) {
 	best_move = std::move(move);
       }
     }
+    if (debug) std::cout << "end choices debug" << std::endl;
 
     // Make the best move.
     return best_move;
@@ -1194,6 +1264,9 @@ protected:
 		     bool build_tree = false) const {
     // Pull out the guess.
     const std::string& guess = word_list_.valid[guess_index];
+
+    // Figure out what round we're on.
+    int guesses_so_far = processed_responses_ + depth_ - remaining_depth + 1;
 
     // Compute the possible responses for this guess.
     ResponseDistribution distribution;
@@ -1209,11 +1282,14 @@ protected:
     }
 
     // Maybe start the tree.
-    std::unique_ptr<DecisionTreeNode> tree = MaybeBuildSingleWordTree(build_tree, guess);
+    std::unique_ptr<DecisionTreeNode> tree = MaybeBuildSingleWordTree(build_tree, guess); // DEBUG
 
     // Recusively explore all responses.
     const int correct_guess_code = CorrectGuessCode();
     double guess_sum = 0.0;
+    double max_guesses = 0.0;
+    int num_losses = 0;
+    const bool already_lost = guesses_so_far > MAX_GUESSES;
     for (int response_code = 0; response_code < distribution.size(); response_code++) {
       const int count = distribution[response_code];
       if (count == 0) continue;
@@ -1221,13 +1297,18 @@ protected:
       double expected_guesses = 0.0;
       if (response_code == correct_guess_code) {
 	expected_guesses = 0.0;
+	num_losses += (already_lost ? 1 : 0);
+	// No need to update max_guesses, since it's 0 for this branch.
       } else {
 	WordSet new_answers = FilterAnswers(remaining_answers, guess_index, response_code, cache_);
 	// TODO: consider whether optimizing this with a response cache is worth it.
 	WordSet new_guesses = FilterGuesses(word_list_.valid, remaining_guesses,
 					    guess, CodeToResponse(response_code), game_type_);
-	Move move = EvaluatePosition(new_answers, new_guesses, remaining_depth - 1, build_tree);
-	expected_guesses = 1.0 + move.min_expected_guesses;
+	const bool debug = false; // (guess == "roate" && guesses_so_far == 1 && response_code == 106);
+	Move move = EvaluatePosition(new_answers, new_guesses, remaining_depth - 1, build_tree, debug);
+	expected_guesses = 1.0 + move.best_expected_guesses;
+	max_guesses = std::max(max_guesses, 1.0 + move.max_expected_guesses);
+	num_losses += move.num_losses;
 	if (tree != nullptr) {
 	  tree->response_to_decision[response_code] = std::move(move.tree);
 	}
@@ -1235,9 +1316,16 @@ protected:
       guess_sum += P * expected_guesses;
     }
 
+    // DEBUG
+    // if (tree != nullptr) {
+    //   tree->word += ":" + std::to_string(num_losses) + ":agg";
+    // }
+
     return {
       .word = &word_list_.valid[guess_index],
-      .min_expected_guesses = guess_sum,
+      .best_expected_guesses = guess_sum,
+      .max_expected_guesses = max_guesses,
+      .num_losses = num_losses,
       .tree = std::move(tree),
     };
   }
@@ -1258,8 +1346,25 @@ private:
     return std::make_unique<DecisionTreeNode>(word_1, std::move(children));
   }
 
+  bool LhsMoveIsBetter(const Move& lhs_move, const Move& rhs_move) const {
+    switch (optimization_metric_) {
+    case MIN_EXPECTED_GUESSES:
+      return lhs_move.best_expected_guesses < rhs_move.best_expected_guesses;
+    case MIN_WORST_CASE:
+      // Compare first on max_expected_guesses, then best_expected_guesses.
+      return std::make_pair(lhs_move.max_expected_guesses, lhs_move.best_expected_guesses)
+	< std::make_pair(rhs_move.max_expected_guesses, rhs_move.best_expected_guesses);
+    case MIN_LOSSES:
+      // Compare first on num_losses, then best_expected_guesses.
+      return std::make_pair(lhs_move.num_losses, lhs_move.best_expected_guesses)
+	< std::make_pair(rhs_move.num_losses, rhs_move.best_expected_guesses);
+
+    }
+  }
+
   int depth_;
   int words_per_node_;
+  OptimizationMetric optimization_metric_;
   const ResponseCache& cache_;
 };
 
@@ -1625,6 +1730,14 @@ void CollectStats(const WordList& list, const Flags& flags, const GameType game_
 	const int remaining_words = outcome.remaining_word_history[i];
 	const int remaining_guesses = outcome.guess_count - i;
 	stats[j].remaining_words_to_guesses[remaining_words].push_back(remaining_guesses);
+      }
+      if (outcome.guess_count > MAX_GUESSES) {
+	std::cout << "Lost on word: " << word << std::endl;
+	std::unique_ptr<Strategy> strategy = MakeStrategy(strategy_names[j], list,
+							  flags_per_strategy[j], game_type);
+	// more_debug = true;
+	SelfPlay(word, *strategy, NORMAL);
+	// more_debug = false;
       }
     }
   }
