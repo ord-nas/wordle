@@ -1107,8 +1107,6 @@ OptimizationMetric ToOptimizationMetric(const std::string& str) {
   }
 }
 
-bool more_debug = false;
-
 class TreeSearch : public RealtimeStrategy {
 public:
   TreeSearch(const WordList& word_list, const Flags& flags, GameType game_type)
@@ -1141,13 +1139,13 @@ protected:
     const std::string* word = nullptr;
     double best_expected_guesses = 0.0;
     double max_expected_guesses = 0.0;
+    // How many words we expect we will lose on if we make this guess.
     int num_losses = 0;
     std::unique_ptr<DecisionTreeNode> tree = nullptr;
   };
 
   Guess MakeGuessInternal() override {
-    // std::cout << "MakeGuessInternal" << std::endl;
-    const Move move = EvaluatePosition(answer_set_, guess_set_, depth_, /*build_tree=*/false, /*debug=*/more_debug);
+    const Move move = EvaluatePosition(answer_set_, guess_set_, depth_);
     return {
       .word = *move.word,
     };
@@ -1156,8 +1154,7 @@ protected:
   Move EvaluatePosition(const WordSet& remaining_answers,
 			const WordSet& remaining_guesses,
 			int remaining_depth,
-			bool build_tree = false,
-			bool debug = false) const {
+			bool build_tree = false) const {
     // Figure out what round we're on.
     int guesses_so_far = processed_responses_ + depth_ - remaining_depth;
 
@@ -1168,33 +1165,28 @@ protected:
 
     // Bail early if there is exactly one word remaining.
     if (remaining_answers.size() == 1) {
-      const int num_losses = (guesses_so_far >= MAX_GUESSES ? 1 : 0);
-      if (debug) std::cout << "Hmmm bailing with size 1" << std::endl;
       return {
 	.word = &word_list_.answers[remaining_answers[0]],
 	.best_expected_guesses = 0,
 	.max_expected_guesses = 0,
-	.num_losses = num_losses,
+	.num_losses = (guesses_so_far >= MAX_GUESSES ? 1 : 0),
 	.tree = MaybeBuildSingleWordTree(build_tree,
-					 word_list_.answers[remaining_answers[0]]),// + ":" + std::to_string(num_losses) + ":1w"), // DEBUG
+					 word_list_.answers[remaining_answers[0]]),
       };
     }
 
     // Bail early if there are exactly two words remaining.
     if (remaining_answers.size() == 2) {
-      const int num_losses = (guesses_so_far >= MAX_GUESSES ? 2 :
-			      guesses_so_far >= MAX_GUESSES - 1 ? 1 :
-			      0);
-      const int num_second_word_losses = (guesses_so_far >= MAX_GUESSES - 1 ? 1 : 0);
-      if (debug) std::cout << "Hmmm bailing with size 2" << std::endl;
       return {
 	.word = &word_list_.answers[remaining_answers[0]],
 	.best_expected_guesses = 0.5,
 	.max_expected_guesses = 1.0,
-	.num_losses = num_losses,
+	.num_losses = (guesses_so_far >= MAX_GUESSES ? 2 :
+		       guesses_so_far >= MAX_GUESSES - 1 ? 1 :
+		       0),
 	.tree = MaybeBuildTwoWordTree(build_tree,
-				      word_list_.answers[remaining_answers[0]],// + ":" + std::to_string(num_losses) + ":2w", // DEBUG
-				      word_list_.answers[remaining_answers[1]]),// + ":" + std::to_string(num_second_word_losses) + ":2w"),
+				      word_list_.answers[remaining_answers[0]],
+				      word_list_.answers[remaining_answers[1]]),
       };
     }
 
@@ -1219,7 +1211,6 @@ protected:
       const auto& best = best_guesses.result()[0];
       const double best_expected_guesses = best.first;
       const int guess_index = best.second;
-      if (debug) std::cout << "Hmmm bailing with no remaining depth" << std::endl;
       return {
 	.word = &word_list_.valid[guess_index],
 	.best_expected_guesses = best_expected_guesses,
@@ -1241,17 +1232,14 @@ protected:
       .num_losses = std::numeric_limits<int>::max(),
       .tree = nullptr,
     };
-    if (debug) std::cout << "start choices debug" << std::endl;
     for (const auto& entry : best_guesses.result()) {
       const int guess_index = entry.second;
       Move move = EvaluateGuess(guess_index, remaining_answers, remaining_guesses,
 				remaining_depth, build_tree);
-      if (debug) std::cout << "guess " << word_list_.valid[guess_index] << " with score " << entry.first << " num losses " << move.num_losses << std::endl;
       if (LhsMoveIsBetter(move, best_move)) {
 	best_move = std::move(move);
       }
     }
-    if (debug) std::cout << "end choices debug" << std::endl;
 
     // Make the best move.
     return best_move;
@@ -1282,7 +1270,7 @@ protected:
     }
 
     // Maybe start the tree.
-    std::unique_ptr<DecisionTreeNode> tree = MaybeBuildSingleWordTree(build_tree, guess); // DEBUG
+    std::unique_ptr<DecisionTreeNode> tree = MaybeBuildSingleWordTree(build_tree, guess);
 
     // Recusively explore all responses.
     const int correct_guess_code = CorrectGuessCode();
@@ -1304,8 +1292,7 @@ protected:
 	// TODO: consider whether optimizing this with a response cache is worth it.
 	WordSet new_guesses = FilterGuesses(word_list_.valid, remaining_guesses,
 					    guess, CodeToResponse(response_code), game_type_);
-	const bool debug = false; // (guess == "roate" && guesses_so_far == 1 && response_code == 106);
-	Move move = EvaluatePosition(new_answers, new_guesses, remaining_depth - 1, build_tree, debug);
+	Move move = EvaluatePosition(new_answers, new_guesses, remaining_depth - 1, build_tree);
 	expected_guesses = 1.0 + move.best_expected_guesses;
 	max_guesses = std::max(max_guesses, 1.0 + move.max_expected_guesses);
 	num_losses += move.num_losses;
@@ -1315,11 +1302,6 @@ protected:
       }
       guess_sum += P * expected_guesses;
     }
-
-    // DEBUG
-    // if (tree != nullptr) {
-    //   tree->word += ":" + std::to_string(num_losses) + ":agg";
-    // }
 
     return {
       .word = &word_list_.valid[guess_index],
@@ -1730,14 +1712,6 @@ void CollectStats(const WordList& list, const Flags& flags, const GameType game_
 	const int remaining_words = outcome.remaining_word_history[i];
 	const int remaining_guesses = outcome.guess_count - i;
 	stats[j].remaining_words_to_guesses[remaining_words].push_back(remaining_guesses);
-      }
-      if (outcome.guess_count > MAX_GUESSES) {
-	std::cout << "Lost on word: " << word << std::endl;
-	std::unique_ptr<Strategy> strategy = MakeStrategy(strategy_names[j], list,
-							  flags_per_strategy[j], game_type);
-	// more_debug = true;
-	SelfPlay(word, *strategy, NORMAL);
-	// more_debug = false;
       }
     }
   }
