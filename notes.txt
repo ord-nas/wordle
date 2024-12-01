@@ -54,3 +54,10 @@ a max_explored_probability.
 Or maybe we need to approximate a count->expected_guesses function based on the
 values that we get from the responses we *do* explore, and then apply them to
 the ones we *don't* ?
+
+Add annotate_decision_tree_stats mode: reads decision tree file, generates
+stats, writes back out the decision tree file with a comment at the top with
+stats.
+
+Add colorize_decision_tree mode: reads decision tree file, replaces response
+codes with colorized guesses, spits it to stdout (to be piped to `less -R`).
