@@ -306,15 +306,16 @@ std::string ColorGuess(const std::string& guess, const Response& response) {
 
 class ResponseCache {
 public:
-  explicit ResponseCache(const WordList& word_list)
-    : num_valid_(word_list.valid.size()),
-      num_answers_(word_list.answers.size()),
-      data_(num_answers_ * num_valid_) {
+  explicit ResponseCache(const std::vector<std::string>& guess_list,
+			 const std::vector<std::string>& answer_list)
+    : num_guesses_(guess_list.size()),
+      num_answers_(answer_list.size()),
+      data_(num_guesses_ * num_answers_) {
     std::cout << "Initializing ResponseCache ... " << std::flush;
-    for (int i = 0; i < word_list.valid.size(); i++) {
-      const std::string& guess = word_list.valid[i];
-      for (int j = 0; j < word_list.answers.size(); j++) {
-	const std::string& answer = word_list.answers[j];
+    for (int i = 0; i < num_guesses_; i++) {
+      const std::string& guess = guess_list[i];
+      for (int j = 0; j < num_answers_; j++) {
+	const std::string& answer = answer_list[j];
 	const Response response = ScoreGuess(guess, answer);
 	data_[i * num_answers_ + j] = ResponseToCode(response);
       }
@@ -327,7 +328,7 @@ public:
   }
 
 private:
-  int num_valid_;
+  int num_guesses_;
   int num_answers_;
   std::vector<int> data_;
 };
@@ -559,11 +560,17 @@ public:
     return *instance;
   }
 
-  const ResponseCache& GetResponseCache(const WordList& word_list) {
-    if (response_caches_.count(&word_list) == 0) {
-      response_caches_.emplace(&word_list, ResponseCache(word_list));
+  const ResponseCache& GetResponseCache(const std::vector<std::string>& guess_list,
+					const std::vector<std::string>& answer_list) {
+    const auto key = std::make_pair(&guess_list, &answer_list);
+    if (response_caches_.count(key) == 0) {
+      response_caches_.emplace(key, ResponseCache(guess_list, answer_list));
     }
-    return response_caches_.at(&word_list);
+    return response_caches_.at(key);
+  }
+
+  const ResponseCache& GetResponseCache(const WordList& word_list) {
+    return GetResponseCache(word_list.valid, word_list.answers);
   }
 
   const DecisionTreeNode& GetDecisionTree(const std::string& filename) {
@@ -574,11 +581,16 @@ public:
   }
 
 private:
+  using ResponseCacheKey = std::pair<const std::vector<std::string>*,
+				     const std::vector<std::string>*>;
+
   ResourceManager() {}
 
   static ResourceManager* instance;
 
-  std::unordered_map<const WordList*, ResponseCache> response_caches_;
+  // Using std::map instead of std::unordered_map because there is no default
+  // hash implementation for std::pair.
+  std::map<ResponseCacheKey, ResponseCache> response_caches_;
 
   std::unordered_map<std::string, std::unique_ptr<DecisionTreeNode>> decision_trees_;
 };
