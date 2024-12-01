@@ -934,6 +934,57 @@ protected:
   }
 };
 
+class MaxTwoGuessWins : public RealtimeStrategy {
+public:
+  MaxTwoGuessWins(const WordList& word_list, const Flags& flags, GameType game_type)
+    : RealtimeStrategy(word_list, flags, game_type),
+      cache_(ResourceManager::GetInstance().GetResponseCache(word_list)){}
+
+protected:
+  Guess MakeGuessInternal() override {
+    const std::string* guess = nullptr;
+
+    if (processed_responses_ == 0) {
+      // If this is the first guess, pick the word that has the most distinct
+      // responses.
+      int max_responses = 0;
+      for (int guess_index : guess_set_) {
+	// Compute the response distribution as normal.
+	ResponseDistribution distribution;
+	distribution.fill(0);
+	for (const int answer_index : answer_set_) {
+	  ++distribution[cache_.Get(guess_index, answer_index)];
+	}
+	// Count the number of non-zero entries in the distribution.
+	int num_responses = 0;
+	for (int cnt : distribution) {
+	  if (cnt != 0) {
+	    ++num_responses;
+	  }
+	}
+	// If this count is the best so far, record it.
+	if (num_responses > max_responses) {
+	  max_responses = num_responses;
+	  guess = &word_list_.valid[guess_index];
+	}
+      }
+    } else if (!answer_set_.empty()) {
+      // If this is the second guess or later, just pick the first word that is
+      // still valid.
+      guess = &word_list_.answers[answer_set_[0]];
+    }
+
+    if (guess == nullptr) {
+      die("Ran out of valid guesses or answers? Bug.");
+    }
+
+    return { .word = *guess };
+  }
+
+private:
+  const ResponseCache& cache_;
+};
+
 class BestResponseDistribution : public RealtimeStrategy {
 public:
   BestResponseDistribution(const WordList& word_list, const Flags& flags, GameType game_type)
@@ -1408,6 +1459,8 @@ std::unique_ptr<Strategy> MakeStrategy(const std::string& name,
     return std::make_unique<MinExpectedGuesses>(word_list, flags, game_type);
   } else if (name == "TreeSearch") {
     return std::make_unique<TreeSearch>(word_list, flags, game_type);
+  } else if (name == "MaxTwoGuessWins") {
+    return std::make_unique<MaxTwoGuessWins>(word_list, flags, game_type);
   } else if (name == "DecisionTreeFile") {
     static bool once = false;
     if (!once) {
