@@ -821,6 +821,18 @@ bool ValidGuess(const std::vector<std::string>& word_list,
 struct Guess {
   std::string word;
   std::string reasoning;
+  // True if instead of a guess, we would like to resign.
+  bool resign = false;
+};
+
+// Helper function to generate a resignation guess, since { .resign = true }
+// doesn't seem to work.
+Guess Resignation() {
+  return {
+    .word = "",
+    .reasoning = "",
+    .resign = true,
+  };
 };
 
 // Base class for a thing that can play Wordle.
@@ -868,14 +880,6 @@ public:
     // If there are no more valid guesses left, something went wrong.
     if (answer_set_.empty()) {
       die("Can't make a guess if there are no more possible words!");
-    }
-
-    // If we know the answer, guess it!
-    if (answer_set_.size() == 1) {
-      return {
-	.word = word_list_.answers[answer_set_[0]],
-	.reasoning = "Only one word remaining",
-      };
     }
 
     // Otherwise, we actually need to do work. Delegate to subclass-specific
@@ -941,8 +945,13 @@ public:
 
 protected:
   Guess MakeGuessInternal() override {
-    const std::string* guess = nullptr;
+    // If this is after the second guess, we don't care anymore, just resign.
+    if (processed_responses_ >= 2) {
+      return Resignation();
+    }
 
+    // Otherwise, let's compute our guess.
+    const std::string* guess = nullptr;
     if (processed_responses_ == 0) {
       // If this is the first guess, pick the word that has the most distinct
       // responses.
@@ -968,8 +977,8 @@ protected:
 	}
       }
     } else if (!answer_set_.empty()) {
-      // If this is the second guess or later, just pick the first word that is
-      // still valid.
+      // If this is the second guess, just pick the first word that is still
+      // valid.
       guess = &word_list_.answers[answer_set_[0]];
     }
 
@@ -995,7 +1004,15 @@ public:
 
 protected:
   Guess MakeGuessInternal() override {
-    // Find the best guess.
+    // If we know the answer, guess it!
+    if (answer_set_.size() == 1) {
+      return {
+	.word = word_list_.answers[answer_set_[0]],
+	.reasoning = "Only one word remaining",
+      };
+    }
+
+    // Otherwise we have to work to find the best guess.
     double best_score = IsMaximizer() ?
       -std::numeric_limits<double>::infinity() :
       std::numeric_limits<double>::infinity();
@@ -1497,9 +1514,21 @@ Verbosity ToVerbosity(const std::string& str) {
 
 struct GameOutcome {
   int guess_count = 0;
+  // True if we successfully guessed the word, false if we resigned early.
+  bool success = false;
   // remaining_word_history[i] means the number of remaining words after i
   // receiving i responses.
   std::vector<int> remaining_word_history;
+
+  std::string ReportString() const {
+    std::ostringstream ss;
+    if (success) {
+      ss << "Guessed in " << guess_count;
+    } else {
+      ss << "Resigned after " << guess_count << " guesses";
+    }
+    return ss.str();
+  }
 };
 
 GameOutcome SelfPlay(const std::string& target,
@@ -1513,6 +1542,10 @@ GameOutcome SelfPlay(const std::string& target,
       outcome.remaining_word_history.push_back(remaining_words);
     }
     guess = strategy.MakeGuess();
+    // Return early on resignation.
+    if (guess.resign) {
+      return outcome;
+    }
     Response response = ScoreGuess(guess.word, target);
     if (verbosity >= VERBOSE && !guess.reasoning.empty()) {
       std::cout << guess.reasoning << std::endl;
@@ -1523,6 +1556,7 @@ GameOutcome SelfPlay(const std::string& target,
     strategy.ProcessResponse(guess.word, response);
     ++outcome.guess_count;
   }
+  outcome.success = true;
   return outcome;
 }
 
@@ -1547,7 +1581,7 @@ void SelfPlayLoop(const WordList& list, const Flags& flags, const GameType game_
     std::unique_ptr<Strategy> strategy = MakeStrategy(strategy_name, list,
 						      flags, game_type);
     const GameOutcome outcome = SelfPlay(word, *strategy, verbosity);
-    std::cout << "Guessed in " << outcome.guess_count << std::endl;
+    std::cout << outcome.ReportString() << std::endl;
   }
 }
 
@@ -1586,14 +1620,16 @@ Response GetHumanResponse() {
   }
 }
 
-int AiPlay(Strategy& strategy,
-	   Verbosity verbosity) {
-  int count = 0;
+GameOutcome AiPlay(Strategy& strategy,
+		   Verbosity verbosity) {
   Guess guess;
+  GameOutcome outcome;
   Response response;
   while (!FullyCorrect(response)) {
-    ++count;
     guess = strategy.MakeGuess();
+    if (guess.resign) {
+      return outcome;
+    }
     std::cout << "Guess: " << guess.word << std::endl;
     if (verbosity >= VERBOSE && !guess.reasoning.empty()) {
       std::cout << guess.reasoning << std::endl;
@@ -1603,8 +1639,10 @@ int AiPlay(Strategy& strategy,
       std::cout << ColorGuess(guess.word, response) << std::endl;
     }
     strategy.ProcessResponse(guess.word, response);
+    ++outcome.guess_count;
   }
-  return count;
+  outcome.success = true;
+  return outcome;
 }
 
 void AiPlayLoop(const WordList& list, const Flags& flags, const GameType game_type) {
@@ -1614,8 +1652,8 @@ void AiPlayLoop(const WordList& list, const Flags& flags, const GameType game_ty
   while (true) {
     std::unique_ptr<Strategy> strategy = MakeStrategy(strategy_name, list,
 						      flags, game_type);
-    const int guesses = AiPlay(*strategy, verbosity);
-    std::cout << "Guessed in " << guesses << std::endl;
+    const GameOutcome outcome = AiPlay(*strategy, verbosity);
+    std::cout << outcome.ReportString() << std::endl;
     std::cout << "Starting a new game..." << std::endl;
   }
 }
@@ -1688,9 +1726,9 @@ public:
     }
   }
 
-  void Report(int guesses) {
+  void Report(const GameOutcome& outcome) {
     if (verbosity_ >= NORMAL) {
-      std::cout << "Guessed in " << guesses << std::endl;
+      std::cout << outcome.ReportString() << std::endl;
     }
   }
 
@@ -1713,6 +1751,10 @@ private:
 };
 
 struct StrategyStats {
+  static constexpr int RESIGNATION = -1;
+
+  // guess_count_history[i] is the number of guesses for game i. Will be
+  // RESIGNATION if we didn't win that game.
   std::vector<int> guess_count_history;
   std::map<int, std::vector<int>> remaining_words_to_guesses;
 };
@@ -1771,13 +1813,17 @@ void CollectStats(const WordList& list, const Flags& flags, const GameType game_
 							flags_per_strategy[j], game_type);
       progress.Report(i, word, strategy_names[j]);
       const GameOutcome outcome = SelfPlay(word, *strategy, verbosity);
-      progress.Report(outcome.guess_count);
+      progress.Report(outcome);
       // Add the outcome to overall stats.
-      stats[j].guess_count_history.push_back(outcome.guess_count);
-      for (int i = 0; i < outcome.remaining_word_history.size(); i++) {
-	const int remaining_words = outcome.remaining_word_history[i];
-	const int remaining_guesses = outcome.guess_count - i;
-	stats[j].remaining_words_to_guesses[remaining_words].push_back(remaining_guesses);
+      if (outcome.success) {
+	stats[j].guess_count_history.push_back(outcome.guess_count);
+	for (int i = 0; i < outcome.remaining_word_history.size(); i++) {
+	  const int remaining_words = outcome.remaining_word_history[i];
+	  const int remaining_guesses = outcome.guess_count - i;
+	  stats[j].remaining_words_to_guesses[remaining_words].push_back(remaining_guesses);
+	}
+      } else {
+	stats[j].guess_count_history.push_back(StrategyStats::RESIGNATION);
       }
     }
   }
@@ -1789,14 +1835,26 @@ void CollectStats(const WordList& list, const Flags& flags, const GameType game_
   for (int j = 0; j < strategy_names.size(); j++) {
     std::cout << strategy_names[j] << std::endl;
     int total_guesses = 0;
+    int total_games_finished = 0;
+    int total_resignations = 0;
     std::map<int, int> guess_distribution;
     for (const int guess_count : stats[j].guess_count_history) {
-      ++guess_distribution[guess_count];
-      total_guesses += guess_count;
+      if (guess_count == StrategyStats::RESIGNATION) {
+	++total_resignations;
+      } else {
+	++guess_distribution[guess_count];
+	total_guesses += guess_count;
+	++total_games_finished;
+      }
     }
-    std::cout << "Average guesses: " << (1.0 * total_guesses / rounds) << std::endl;
+    std::cout << "Average guesses (excluding resignations): "
+	      << (1.0 * total_guesses / total_games_finished)
+	      << std::endl;
     for (const auto& entry : guess_distribution) {
       std::cout << entry.first << " guesses: " << (100.0 * entry.second / rounds) << " %" << std::endl;
+    }
+    if (total_resignations > 0) {
+      std::cout << "Resignations/Losses: " << (100.0 * total_resignations / rounds) << " %" << std::endl;
     }
     std::cout << std::endl;
   }
