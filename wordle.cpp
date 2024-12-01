@@ -199,7 +199,6 @@ constexpr int NUM_LETTERS = 5;
 constexpr int NUM_RESPONSES = 243; // 3 ^ NUM_LETTERS
 constexpr int MAX_VERBOSE_SET_SIZE = 15;
 constexpr int UNIMPLEMENTED = -1;
-constexpr int MAX_GUESSES = 6;
 
 // Guess outcomes for a full word. Response[i] is the outcome for guess[i].
 using Response = std::array<Outcome, NUM_LETTERS>;
@@ -1153,7 +1152,7 @@ enum OptimizationMetric {
   // Minimize the worst case (most guesses), then the average number of guesses.
   MIN_WORST_CASE = 1,
 
-  // Minimize the number of losses (score > MAX_GUESSES), then the average
+  // Minimize the number of losses (score > max_guesses), then the average
   // number of guesses.
   MIN_LOSSES = 2,
 };
@@ -1176,6 +1175,7 @@ public:
     : RealtimeStrategy(word_list, flags, game_type),
       depth_(flags.GetInt("depth", /*default=*/"1")),
       words_per_node_(flags.GetInt("words_per_node", /*default=*/"2")),
+      max_guesses_(flags.GetInt("max_guesses", /*default=*/"6")),
       optimization_metric_(ToOptimizationMetric(flags.Get("optimization_metric", /*default=*/"MIN_EXPECTED_GUESSES"))),
       cache_(ResourceManager::GetInstance().GetResponseCache(word_list)) {}
 
@@ -1232,7 +1232,7 @@ protected:
 	.word = &word_list_.answers[remaining_answers[0]],
 	.best_expected_guesses = 0,
 	.max_expected_guesses = 0,
-	.num_losses = (guesses_so_far >= MAX_GUESSES ? 1 : 0),
+	.num_losses = (guesses_so_far >= max_guesses_ ? 1 : 0),
 	.tree = MaybeBuildSingleWordTree(build_tree,
 					 word_list_.answers[remaining_answers[0]]),
       };
@@ -1244,8 +1244,8 @@ protected:
 	.word = &word_list_.answers[remaining_answers[0]],
 	.best_expected_guesses = 0.5,
 	.max_expected_guesses = 1.0,
-	.num_losses = (guesses_so_far >= MAX_GUESSES ? 2 :
-		       guesses_so_far >= MAX_GUESSES - 1 ? 1 :
+	.num_losses = (guesses_so_far >= max_guesses_ ? 2 :
+		       guesses_so_far >= max_guesses_ - 1 ? 1 :
 		       0),
 	.tree = MaybeBuildTwoWordTree(build_tree,
 				      word_list_.answers[remaining_answers[0]],
@@ -1338,9 +1338,9 @@ protected:
     // Recusively explore all responses.
     const int correct_guess_code = CorrectGuessCode();
     double guess_sum = 0.0;
-    double max_guesses = 0.0;
+    double guess_max = 0.0;
     int num_losses = 0;
-    const bool already_lost = guesses_so_far > MAX_GUESSES;
+    const bool already_lost = guesses_so_far > max_guesses_;
     for (int response_code = 0; response_code < distribution.size(); response_code++) {
       const int count = distribution[response_code];
       if (count == 0) continue;
@@ -1349,7 +1349,7 @@ protected:
       if (response_code == correct_guess_code) {
 	expected_guesses = 0.0;
 	num_losses += (already_lost ? 1 : 0);
-	// No need to update max_guesses, since it's 0 for this branch.
+	// No need to update guess_max, since it's 0 for this branch.
       } else {
 	WordSet new_answers = FilterAnswers(remaining_answers, guess_index, response_code, cache_);
 	// TODO: consider whether optimizing this with a response cache is worth it.
@@ -1357,7 +1357,7 @@ protected:
 					    guess, CodeToResponse(response_code), game_type_);
 	Move move = EvaluatePosition(new_answers, new_guesses, remaining_depth - 1, build_tree);
 	expected_guesses = 1.0 + move.best_expected_guesses;
-	max_guesses = std::max(max_guesses, 1.0 + move.max_expected_guesses);
+	guess_max = std::max(guess_max, 1.0 + move.max_expected_guesses);
 	num_losses += move.num_losses;
 	if (tree != nullptr) {
 	  tree->response_to_decision[response_code] = std::move(move.tree);
@@ -1369,7 +1369,7 @@ protected:
     return {
       .word = &word_list_.valid[guess_index],
       .best_expected_guesses = guess_sum,
-      .max_expected_guesses = max_guesses,
+      .max_expected_guesses = guess_max,
       .num_losses = num_losses,
       .tree = std::move(tree),
     };
@@ -1409,6 +1409,7 @@ private:
 
   int depth_;
   int words_per_node_;
+  int max_guesses_;
   OptimizationMetric optimization_metric_;
   const ResponseCache& cache_;
 };
